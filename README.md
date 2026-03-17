@@ -107,6 +107,8 @@ RepoCtx is intended for the Claude Desktop app, not the web app.
 
 **2. Add RepoCtx**
 
+If your config file already has top-level keys like `preferences`, keep them and add `mcpServers` alongside them.
+
 ```json
 {
   "mcpServers": {
