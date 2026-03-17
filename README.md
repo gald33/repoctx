@@ -109,3 +109,30 @@ Use the same `session_id` and `task_id` for both `control` and `repoctx` runs so
 ```bash
 python3 -m pytest -q
 ```
+
+## PyPI Publishing
+
+This repository is set up to publish to PyPI from GitHub Actions using trusted publishing.
+
+### One-Time PyPI Setup
+
+In PyPI, add a trusted publisher with these values:
+
+- owner: `gald33`
+- repository: `repoctx`
+- workflow file: `publish-pypi.yml`
+
+No PyPI API token needs to be stored in GitHub when trusted publishing is configured.
+
+### Release Flow
+
+1. Bump `version` in `pyproject.toml`.
+2. Commit and push the version change to `main`.
+3. Create and push a version tag like `v0.1.0`.
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Pushing the tag triggers `.github/workflows/publish-pypi.yml`, which builds the sdist and wheel and publishes them to PyPI.
