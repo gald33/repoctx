@@ -1,153 +1,166 @@
 # RepoCtx
 
-Local repository intelligence for coding agents.
+**Give your AI coding agent the right context, automatically.**
 
-## What It Does
-
-`repoctx` inspects a local repository and returns a compact task context pack:
-
-- relevant docs and agent guidance files
-- relevant source files
-- likely related tests
-- nearby graph neighbors from local imports
-- a readable markdown pack plus structured JSON
-
-## Installation
-
-Install the published package from PyPI:
+RepoCtx scans your repository and builds a focused context pack for any task — the relevant docs, source files, tests, and import neighbors your agent actually needs. No more pasting files manually or hoping the AI figures out your codebase.
 
 ```bash
-python3 -m pip install repoctx-mcp
+pip install repoctx-mcp
+repoctx "add retry jitter to webhook delivery" --repo ./my-project
 ```
 
-The installed CLI command remains `repoctx`.
+## Why RepoCtx?
 
-Install MCP support from PyPI when you want to run the MCP server:
+AI coding agents work better when they see the right files. RepoCtx does the file-finding for you:
+
+- **Docs** — surfaces `AGENTS.md`, `README.md`, architecture guides, and convention files ranked by relevance to your task
+- **Source files** — finds the code most related to what you're working on
+- **Tests** — discovers matching test files so the agent can follow existing patterns
+- **Import graph** — traces `import`/`require` statements to pull in closely connected modules
+
+The output is a single Markdown pack (or JSON) you can feed directly to your agent.
+
+## Quick Start
+
+### Install
 
 ```bash
-python3 -m pip install "repoctx-mcp[mcp]"
+pip install repoctx-mcp
 ```
 
-Install the package from the standalone repository root:
+Requires Python 3.11+.
+
+### Run
+
+Pass a task description and point at your repo:
 
 ```bash
-python3 -m pip install -e .
+repoctx "refactor the auth middleware to support OAuth" --repo ./my-app
 ```
 
-This installs the core CLI without MCP server support.
-
-Install MCP support when you want to run the MCP server:
+Get JSON instead of Markdown:
 
 ```bash
-python3 -m pip install -e ".[mcp]"
+repoctx "refactor the auth middleware to support OAuth" --repo ./my-app --format json
 ```
 
-Install development dependencies for tests, including the MCP-related test coverage:
+That's it. RepoCtx prints a ranked context pack to stdout.
+
+## Use with Cursor, Claude & Other Agents (MCP)
+
+RepoCtx ships an MCP server so AI tools can call it directly. Install the MCP extra:
 
 ```bash
-python3 -m pip install -e ".[dev]"
+pip install "repoctx-mcp[mcp]"
 ```
 
-## CLI
-
-Run the CLI against any local repository by passing its path with `--repo`:
+Start the server pointed at your repo:
 
 ```bash
-repoctx "add retry jitter to webhook delivery" --repo /path/to/target-repo --format markdown
+python3 -m repoctx.mcp_server --repo /path/to/your-repo
 ```
 
-The module entry point stays available too:
+The server exposes a single tool — `get_task_context(task)` — that agents call to get the context pack on demand.
+
+### Cursor Setup
+
+Add this to your MCP config so Cursor can use RepoCtx as a tool:
+
+```json
+{
+  "mcpServers": {
+    "repoctx": {
+      "command": "python3",
+      "args": ["-m", "repoctx.mcp_server", "--repo", "/path/to/your-repo"]
+    }
+  }
+}
+```
+
+## What You Get
+
+For a task like `"add retry jitter to webhook delivery"` in a webhook project, RepoCtx returns:
+
+```markdown
+## Summary
+Identified 2 docs, 2 files, 1 test, and 1 graph neighbor relevant to
+'add retry jitter to webhook delivery'.
+
+## Relevant Docs
+- AGENTS.md — matches: retry, webhook
+- docs/WEBHOOKS.md — matches: retry, webhook
+  > Webhook delivery retries should use exponential backoff with jitter.
+
+## Relevant Files
+- src/webhook/retry_policy.py — matches: retry
+  > def compute_retry_delay(): ...
+
+## Related Tests
+- tests/test_retry_policy.py — stem match + imports retry_policy.py
+
+## Graph Neighbors
+- src/webhook/delivery.py — imported by retry_policy.py
+```
+
+The JSON format includes the same sections with numeric scores, snippets, and a pre-rendered `context_markdown` field.
+
+## Supported Languages & Files
+
+| Category | Extensions |
+|----------|-----------|
+| Code | `.py` `.ts` `.tsx` `.js` `.jsx` |
+| Config | `.json` `.yaml` `.yml` |
+| Docs | `.md` `.mdc` |
+
+Import graph tracing works for Python (`import`/`from`) and TypeScript/JavaScript (`import`/`require`).
+
+## Configuration
+
+RepoCtx works out of the box with sensible defaults. If you need to tune it, the main knobs are:
+
+| Setting | Default | What it controls |
+|---------|---------|-----------------|
+| `max_docs` | 6 | Max doc files in context |
+| `max_files` | 8 | Max source files in context |
+| `max_tests` | 6 | Max test files in context |
+| `max_neighbors` | 8 | Max import-graph neighbors |
+| `max_file_bytes` | 16,000 | Max bytes read per file |
+
+Directories like `.git`, `node_modules`, `venv`, `__pycache__`, and `dist` are ignored automatically.
+
+## CLI Reference
+
+```
+repoctx <task> [options]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--repo PATH` | Repository root (default: current directory) |
+| `--format markdown\|json` | Output format (default: `markdown`) |
+| `--verbose` | Enable debug logging |
+
+You can also run it as a module:
 
 ```bash
-python3 -m repoctx "Sync local env with Vercel" --repo /path/to/target-repo --format json
+python3 -m repoctx "your task" --repo ./your-repo
 ```
-
-## MCP Server
-
-Install the MCP extra first, then start the MCP server and point it at the repository you want to inspect:
-
-```bash
-python3 -m pip install -e ".[mcp]"
-python3 -m repoctx.mcp_server --repo /path/to/target-repo
-```
-
-The server exposes `get_task_context(task: string)`.
 
 ## Telemetry
 
-`repoctx` writes local JSONL telemetry to `~/.repoctx/telemetry` by default. CLI and MCP usage record `repoctx_invocation` events automatically. The default telemetry payload stores hashed free-form task text and hashed repo identifiers. CLI runs can also preserve explicit experiment keys such as `session_id`, `task_id`, and `variant`; MCP runs currently generate those identifiers automatically.
+RepoCtx writes local-only JSONL telemetry to `~/.repoctx/telemetry/`. All task text and repo paths are hashed before storage. No data is sent to any external service.
 
-Use the CLI flags below to keep paired experiments aligned across control and treatment runs:
+Set `REPOCTX_TELEMETRY_DIR` to change the storage location.
 
-```bash
-repoctx "add retry jitter to webhook delivery" \
-  --repo /path/to/target-repo \
-  --format json \
-  --session-id bench-001 \
-  --task-id task-001 \
-  --variant repoctx
-```
-
-External experiment harnesses can record downstream agent costs with the Python helper:
-
-```python
-from pathlib import Path
-
-from repoctx.telemetry import record_agent_run
-
-record_agent_run(
-    session_id="bench-001",
-    task_id="task-001",
-    variant="control",
-    surface="cli",
-    query="add retry jitter to webhook delivery",
-    repo_root=Path("/path/to/target-repo"),
-    runner="cursor-agent",
-    success=True,
-    completion_status="completed",
-    agent_duration_ms=18420,
-    tool_calls=6,
-    prompt_tokens=12450,
-    completion_tokens=1730,
-    total_tokens=14180,
-    estimated_cost_usd=0.19,
-    task_completed=True,
-    quality_score=0.9,
-)
-```
-
-Use the same `session_id` and `task_id` for both `control` and `repoctx` runs so you can compare token, cost, and latency deltas later.
-
-## Tests
+## Development
 
 ```bash
+git clone https://github.com/gald33/repoctx.git
+cd repoctx
+pip install -e ".[dev]"
 python3 -m pytest -q
 ```
 
-## PyPI Publishing
+## License
 
-This repository is set up to publish to PyPI from GitHub Actions using trusted publishing.
-
-### One-Time PyPI Setup
-
-In PyPI, add a trusted publisher with these values:
-
-- project name: `repoctx-mcp`
-- owner: `gald33`
-- repository: `repoctx`
-- workflow file: `publish-pypi.yml`
-
-No PyPI API token needs to be stored in GitHub when trusted publishing is configured.
-
-### Release Flow
-
-1. Bump `version` in `pyproject.toml`.
-2. Commit and push the version change to `main`.
-3. Create and push a version tag that matches `project.version`, like `v0.1.1`.
-
-```bash
-git tag v0.1.1
-git push origin v0.1.1
-```
-
-Pushing the tag triggers `.github/workflows/publish-pypi.yml`, which builds the sdist and wheel and publishes them to PyPI.
+MIT
