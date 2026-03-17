@@ -68,13 +68,13 @@ Paste this into one of those files:
   "mcpServers": {
     "repoctx": {
       "command": "python3",
-      "args": ["-m", "repoctx.mcp_server", "--repo", "/absolute/path/to/your/repo"]
+      "args": ["-m", "repoctx.mcp_server"]
     }
   }
 }
 ```
 
-Replace `/absolute/path/to/your/repo` with the repo you want Cursor to understand.
+That is the normal setup. Add `--repo /path/to/repo` only if you need to pin Cursor to a specific repository instead of letting it use its default startup context.
 
 **2. Restart Cursor**
 
@@ -112,11 +112,13 @@ RepoCtx is intended for the Claude Desktop app, not the web app.
   "mcpServers": {
     "repoctx": {
       "command": "python3",
-      "args": ["-m", "repoctx.mcp_server", "--repo", "/absolute/path/to/your/repo"]
+      "args": ["-m", "repoctx.mcp_server"]
     }
   }
 }
 ```
+
+Add `--repo /path/to/repo` only if you want Claude Desktop pinned to one repository.
 
 **3. Restart Claude Desktop**
 
@@ -138,13 +140,13 @@ Add:
 ```toml
 [mcp_servers.repoctx]
 command = "python3"
-args = ["-m", "repoctx.mcp_server", "--repo", "/absolute/path/to/your/repo"]
+args = ["-m", "repoctx.mcp_server"]
 ```
 
 **Option B: Add it from the Codex CLI**
 
 ```bash
-codex mcp add repoctx -- python3 -m repoctx.mcp_server --repo /absolute/path/to/your/repo
+codex mcp add repoctx -- python3 -m repoctx.mcp_server
 ```
 
 You can inspect configured servers with:
@@ -154,6 +156,8 @@ codex mcp list
 ```
 
 If you use the Codex IDE extension, it will read the same MCP configuration.
+
+Add `--repo /path/to/repo` only if you want Codex pinned to one repository.
 
 ## What To Ask Your Agent
 
@@ -199,7 +203,7 @@ Use `--format json` if you want structured output instead of Markdown.
 
 No, not in Cursor, Claude Desktop, or Codex. Those clients start the RepoCtx MCP server for you from the config you provide.
 
-You would only run `python3 -m repoctx.mcp_server --repo ...` yourself if you were debugging the server directly.
+You would only run `python3 -m repoctx.mcp_server` yourself if you were debugging the server directly.
 
 ### Do I need to write a skill?
 
@@ -217,7 +221,8 @@ Not necessarily.
 Yes. RepoCtx also works as a normal CLI for terminal testing or non-MCP usage.
 
 ```bash
-repoctx "refactor the auth middleware to support OAuth" --repo ./my-app
+cd my-app
+repoctx "refactor the auth middleware to support OAuth"
 ```
 
 ## CLI Usage (Optional)
@@ -228,26 +233,27 @@ If you want to use RepoCtx outside an MCP client:
 
 ```bash
 python3 -m pip install repoctx-mcp
-repoctx "your task" --repo /path/to/repo
+cd /path/to/repo
+repoctx "your task"
 ```
 
 JSON output:
 
 ```bash
-repoctx "your task" --repo /path/to/repo --format json
+repoctx "your task" --format json
 ```
 
 Module entry point:
 
 ```bash
-python3 -m repoctx "your task" --repo /path/to/repo
+python3 -m repoctx "your task"
 ```
 
 CLI flags:
 
 | Flag | Description |
 |------|-------------|
-| `--repo PATH` | Repository root to inspect |
+| `--repo PATH` | Optional repository root override |
 | `--format markdown\|json` | Output format |
 | `--verbose` | Enable debug logging |
 
