@@ -21,7 +21,9 @@ classifiers = [
   "Topic :: Software Development :: Libraries",
   "Topic :: Software Development :: Libraries :: Python Modules",
 ]
-dependencies = []
+dependencies = [
+  "mcp>=1.6,<1.7",
+]
 
 [project.urls]
 Homepage = "https://github.com/gald33/repoctx"
@@ -34,7 +36,6 @@ mcp = [
 ]
 dev = [
   "build",
-  "mcp>=1.6,<1.7",
   "pytest>=8.0.0",
 ]
 
