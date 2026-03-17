@@ -22,6 +22,31 @@ jobs:
       - name: Install build tooling
         run: python -m pip install --upgrade build
 
+      - name: Verify tag matches project version
+        run: |
+          python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          version = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+          ref_type = os.environ.get("GITHUB_REF_TYPE")
+          ref_name = os.environ.get("GITHUB_REF_NAME", "")
+
+          if ref_type != "tag":
+              print("Non-tag run detected; skipping tag/version verification.")
+              raise SystemExit(0)
+
+          expected_tag = f"v{version}"
+          if ref_name != expected_tag:
+              raise SystemExit(
+                  f"Release tag {ref_name!r} does not match project.version {version!r}. "
+                  f"Expected tag: {expected_tag!r}."
+              )
+
+          print(f"Verified release tag {ref_name!r} matches project.version {version!r}.")
+          PY
+
       - name: Build wheel and sdist
         run: python -m build
 

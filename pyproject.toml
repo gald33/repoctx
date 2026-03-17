@@ -8,7 +8,25 @@ version = "0.1.0"
 description = "Local repository intelligence for coding agents"
 readme = "README.md"
 requires-python = ">=3.11"
+authors = [
+  {name = "Gal"},
+]
+license = "MIT"
+keywords = ["developer-tools", "repository-analysis", "mcp", "coding-agents"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Software Development :: Libraries",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/gald33/repoctx"
+Repository = "https://github.com/gald33/repoctx"
+Issues = "https://github.com/gald33/repoctx/issues"
 
 [project.optional-dependencies]
 mcp = [

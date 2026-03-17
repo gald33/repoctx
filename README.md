@@ -128,7 +128,7 @@ No PyPI API token needs to be stored in GitHub when trusted publishing is config
 
 1. Bump `version` in `pyproject.toml`.
 2. Commit and push the version change to `main`.
-3. Create and push a version tag like `v0.1.0`.
+3. Create and push a version tag that matches `project.version`, like `v0.1.0`.
 
 ```bash
 git tag v0.1.0
