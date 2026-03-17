@@ -2,6 +2,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+DIST_NAME_PREFIXES = ("repoctx-mcp-", "repoctx_mcp-")
+
 
 def test_build_produces_wheel_and_sdist(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[1]
@@ -14,5 +16,10 @@ def test_build_produces_wheel_and_sdist(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stdout + "\n" + result.stderr
-    assert len(list(tmp_path.glob("repoctx-*.tar.gz"))) == 1
-    assert len(list(tmp_path.glob("repoctx-*.whl"))) == 1
+    sdists = list(tmp_path.glob("*.tar.gz"))
+    wheels = list(tmp_path.glob("*.whl"))
+
+    assert len(sdists) == 1
+    assert len(wheels) == 1
+    assert sdists[0].name.startswith(DIST_NAME_PREFIXES)
+    assert wheels[0].name.startswith(DIST_NAME_PREFIXES)

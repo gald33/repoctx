@@ -14,6 +14,20 @@ Local repository intelligence for coding agents.
 
 ## Installation
 
+Install the published package from PyPI:
+
+```bash
+python3 -m pip install repoctx-mcp
+```
+
+The installed CLI command remains `repoctx`.
+
+Install MCP support from PyPI when you want to run the MCP server:
+
+```bash
+python3 -m pip install "repoctx-mcp[mcp]"
+```
+
 Install the package from the standalone repository root:
 
 ```bash
@@ -118,6 +132,7 @@ This repository is set up to publish to PyPI from GitHub Actions using trusted p
 
 In PyPI, add a trusted publisher with these values:
 
+- project name: `repoctx-mcp`
 - owner: `gald33`
 - repository: `repoctx`
 - workflow file: `publish-pypi.yml`
@@ -128,11 +143,11 @@ No PyPI API token needs to be stored in GitHub when trusted publishing is config
 
 1. Bump `version` in `pyproject.toml`.
 2. Commit and push the version change to `main`.
-3. Create and push a version tag that matches `project.version`, like `v0.1.0`.
+3. Create and push a version tag that matches `project.version`, like `v0.1.1`.
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
 Pushing the tag triggers `.github/workflows/publish-pypi.yml`, which builds the sdist and wheel and publishes them to PyPI.
