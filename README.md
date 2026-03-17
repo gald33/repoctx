@@ -74,7 +74,7 @@ Paste this into one of those files:
 }
 ```
 
-That is the normal setup. Add `--repo /path/to/repo` only if you need to pin Cursor to a specific repository instead of letting it use its default startup context.
+That is the normal setup. RepoCtx will use the startup path the MCP client gives it and automatically resolve to the nearest enclosing git root. Add `--repo /path/to/repo` only if you need to pin Cursor to a specific repository instead of using that automatic behavior.
 
 **2. Restart Cursor**
 
@@ -118,7 +118,7 @@ RepoCtx is intended for the Claude Desktop app, not the web app.
 }
 ```
 
-Add `--repo /path/to/repo` only if you want Claude Desktop pinned to one repository.
+RepoCtx will use the startup path the MCP client gives it and automatically resolve to the nearest enclosing git root. Add `--repo /path/to/repo` only if you want Claude Desktop pinned to one repository.
 
 **3. Restart Claude Desktop**
 
@@ -157,7 +157,7 @@ codex mcp list
 
 If you use the Codex IDE extension, it will read the same MCP configuration.
 
-Add `--repo /path/to/repo` only if you want Codex pinned to one repository.
+RepoCtx will use the startup path the MCP client gives it and automatically resolve to the nearest enclosing git root. Add `--repo /path/to/repo` only if you want Codex pinned to one repository.
 
 ## What To Ask Your Agent
 
@@ -215,6 +215,12 @@ Not necessarily.
 
 - Use a global config if you want RepoCtx available everywhere.
 - Use a project config if you want RepoCtx tied to one repo and shared with teammates.
+
+### How does RepoCtx choose the repo automatically?
+
+By default, RepoCtx uses the startup path from the MCP client and resolves it to the nearest enclosing git root. In practice, that means if the client starts RepoCtx inside a nested repository, RepoCtx focuses on that nested repo rather than walking up to a larger parent checkout.
+
+If you want to override that automatic choice, pass `--repo /path/to/repo`.
 
 ### Can I test RepoCtx from the terminal first?
 
