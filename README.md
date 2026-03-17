@@ -19,17 +19,32 @@ The result is a compact Markdown pack or JSON payload your agent can use directl
 
 ## Start Here
 
-Install RepoCtx with MCP support:
+RepoCtx is primarily used through MCP clients like Cursor, Claude Desktop, and Codex.
+
+Install it with:
 
 ```bash
-python3 -m pip install "repoctx-mcp[mcp]"
+python3 -m pip install repoctx-mcp
 ```
 
 Requires Python 3.11+.
 
-The package name is `repoctx-mcp`, but the command and module name are still `repoctx`.
+Important naming note:
 
-If you use Cursor, start with the Cursor section below.
+- the package name is `repoctx-mcp`
+- the CLI command is `repoctx`
+- the Python module name is also `repoctx`
+
+If you use Cursor, the normal path is:
+
+1. install `repoctx-mcp`
+2. add the MCP config below
+3. restart Cursor
+4. use your agent normally
+
+You do not need to manually run the MCP server in a terminal for normal Cursor use.
+
+If you are here for the default setup, continue with the Cursor section below and paste the config as-is.
 
 ## 5-Minute Setup
 
@@ -44,9 +59,9 @@ Use one of these locations:
 - global config: `~/.cursor/mcp.json`
 - project config: `.cursor/mcp.json`
 
-You can also add the same server through Cursor's **Tools & MCP** settings UI, but the JSON file is the most direct copy-paste path.
+You can also add the same server through Cursor's **Tools & MCP** settings UI, but the JSON file below is the most direct copy-paste path.
 
-Add:
+Paste this into one of those files:
 
 ```json
 {
@@ -199,13 +214,15 @@ Not necessarily.
 
 ### Can I test RepoCtx from the terminal first?
 
-Yes. RepoCtx also works as a normal CLI.
+Yes. RepoCtx also works as a normal CLI for terminal testing or non-MCP usage.
 
 ```bash
 repoctx "refactor the auth middleware to support OAuth" --repo ./my-app
 ```
 
-## CLI Usage
+## CLI Usage (Optional)
+
+Use this section if you want to test RepoCtx from the terminal or use it without an MCP client.
 
 If you want to use RepoCtx outside an MCP client:
 
