@@ -55,6 +55,11 @@ def test_task_retrieval_prioritizes_matching_code_and_tests(tmp_path: Path) -> N
     assert "docs/ROADMAP.md" not in relevant_doc_paths
     assert "tests/test_retry_policy.py" in related_test_paths
     assert result.summary
+    assert result.metrics.files_selected == len(result.relevant_files)
+    assert result.metrics.docs_selected == len(result.relevant_docs)
+    assert result.metrics.tests_selected == len(result.related_tests)
+    assert result.metrics.neighbors_selected == len(result.graph_neighbors)
+    assert result.metrics.output_bytes > 0
 
 
 def test_task_retrieval_handles_capitalized_tokens_and_rule_docs(tmp_path: Path) -> None:

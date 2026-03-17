@@ -55,6 +55,20 @@ class DependencyGraph:
 
 
 @dataclass(slots=True)
+class ContextMetrics:
+    files_considered: int = 0
+    files_selected: int = 0
+    docs_selected: int = 0
+    tests_selected: int = 0
+    neighbors_selected: int = 0
+    scan_duration_ms: int = 0
+    output_bytes: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
 class ContextResponse:
     summary: str
     relevant_docs: list[RankedPath]
@@ -62,9 +76,10 @@ class ContextResponse:
     related_tests: list[RankedPath]
     graph_neighbors: list[RankedPath]
     context_markdown: str
+    metrics: ContextMetrics = field(default_factory=ContextMetrics)
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
+    def to_dict(self, include_metrics: bool = False) -> dict[str, Any]:
+        data = {
             "summary": self.summary,
             "relevant_docs": [item.to_dict() for item in self.relevant_docs],
             "relevant_files": [item.to_dict() for item in self.relevant_files],
@@ -72,3 +87,6 @@ class ContextResponse:
             "graph_neighbors": [item.to_dict() for item in self.graph_neighbors],
             "context_markdown": self.context_markdown,
         }
+        if include_metrics:
+            data["metrics"] = self.metrics.to_dict()
+        return data

@@ -1,10 +1,11 @@
 import re
 from pathlib import Path
+from time import perf_counter
 
 from repoctx.config import DEFAULT_CONFIG, STOPWORDS, RepoCtxConfig
 from repoctx.context_pack import render_context_markdown
 from repoctx.graph import build_dependency_graph, expand_graph_neighbors
-from repoctx.models import ContextResponse, DependencyGraph, FileRecord, RankedPath, RepositoryIndex
+from repoctx.models import ContextMetrics, ContextResponse, DependencyGraph, FileRecord, RankedPath, RepositoryIndex
 from repoctx.scanner import scan_repository
 
 TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
@@ -15,9 +16,14 @@ def get_task_context(
     repo_root: str | Path = ".",
     config: RepoCtxConfig = DEFAULT_CONFIG,
 ) -> ContextResponse:
+    scan_started = perf_counter()
     index = scan_repository(repo_root, config=config)
+    scan_duration_ms = int((perf_counter() - scan_started) * 1000)
     graph = build_dependency_graph(index)
-    return get_task_context_data(task=task, index=index, graph=graph, config=config)
+    response = get_task_context_data(task=task, index=index, graph=graph, config=config)
+    response.metrics.files_considered = len(index.records)
+    response.metrics.scan_duration_ms = scan_duration_ms
+    return response
 
 
 def get_task_context_data(
@@ -46,6 +52,13 @@ def get_task_context_data(
         context_markdown="",
     )
     response.context_markdown = render_context_markdown(response)
+    response.metrics = ContextMetrics(
+        files_selected=len(response.relevant_files),
+        docs_selected=len(response.relevant_docs),
+        tests_selected=len(response.related_tests),
+        neighbors_selected=len(response.graph_neighbors),
+        output_bytes=len(response.context_markdown.encode("utf-8")),
+    )
     return response
 
 
