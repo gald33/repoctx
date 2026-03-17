@@ -1,85 +1,159 @@
 # RepoCtx
 
-**Give your AI coding agent the right context, automatically.**
+**Give your coding agent the right files for the task at hand.**
 
-RepoCtx scans your repository and builds a focused context pack for any task — the relevant docs, source files, tests, and import neighbors your agent actually needs. No more pasting files manually or hoping the AI figures out your codebase.
+RepoCtx scans a local repository and returns a focused context pack: the docs, source files, tests, and import neighbors most relevant to a task like "add retry jitter to webhook delivery" or "refactor auth middleware for OAuth".
 
-```bash
-pip install repoctx-mcp
-repoctx "add retry jitter to webhook delivery" --repo ./my-project
-```
+It is built for developers using tools like Cursor, Claude Desktop, and Codex who want better results without manually pasting half their repo into chat.
 
-## Why RepoCtx?
+## Why Developers Use It
 
-AI coding agents work better when they see the right files. RepoCtx does the file-finding for you:
+When an AI agent misses the right files, it guesses. RepoCtx reduces that guesswork by surfacing:
 
-- **Docs** — surfaces `AGENTS.md`, `README.md`, architecture guides, and convention files ranked by relevance to your task
-- **Source files** — finds the code most related to what you're working on
-- **Tests** — discovers matching test files so the agent can follow existing patterns
-- **Import graph** — traces `import`/`require` statements to pull in closely connected modules
+- relevant docs like `AGENTS.md`, `README.md`, and architecture notes
+- relevant source files for the task
+- likely related tests
+- nearby modules from the local import graph
 
-The output is a single Markdown pack (or JSON) you can feed directly to your agent.
+The result is a compact Markdown pack or JSON payload your agent can use directly.
 
-## Quick Start
+## Start Here
 
-### Install
+Install RepoCtx with MCP support:
 
 ```bash
-pip install repoctx-mcp
+python3 -m pip install "repoctx-mcp[mcp]"
 ```
 
 Requires Python 3.11+.
 
-### Run
+The package name is `repoctx-mcp`, but the command and module name are still `repoctx`.
 
-Pass a task description and point at your repo:
+If you use Cursor, start with the Cursor section below.
 
-```bash
-repoctx "refactor the auth middleware to support OAuth" --repo ./my-app
-```
+## 5-Minute Setup
 
-Get JSON instead of Markdown:
+### Cursor
 
-```bash
-repoctx "refactor the auth middleware to support OAuth" --repo ./my-app --format json
-```
+If you use Cursor, this is the default path.
 
-That's it. RepoCtx prints a ranked context pack to stdout.
+**1. Add RepoCtx to your MCP config**
 
-## Use with Cursor, Claude & Other Agents (MCP)
+Use one of these locations:
 
-RepoCtx ships an MCP server so AI tools can call it directly. Install the MCP extra:
+- global config: `~/.cursor/mcp.json`
+- project config: `.cursor/mcp.json`
 
-```bash
-pip install "repoctx-mcp[mcp]"
-```
+You can also add the same server through Cursor's **Tools & MCP** settings UI, but the JSON file is the most direct copy-paste path.
 
-Start the server pointed at your repo:
-
-```bash
-python3 -m repoctx.mcp_server --repo /path/to/your-repo
-```
-
-The server exposes a single tool — `get_task_context(task)` — that agents call to get the context pack on demand.
-
-### Cursor Setup
-
-Add this to your MCP config so Cursor can use RepoCtx as a tool:
+Add:
 
 ```json
 {
   "mcpServers": {
     "repoctx": {
       "command": "python3",
-      "args": ["-m", "repoctx.mcp_server", "--repo", "/path/to/your-repo"]
+      "args": ["-m", "repoctx.mcp_server", "--repo", "/absolute/path/to/your/repo"]
     }
   }
 }
 ```
 
-## What You Get
+Replace `/absolute/path/to/your/repo` with the repo you want Cursor to understand.
 
-For a task like `"add retry jitter to webhook delivery"` in a webhook project, RepoCtx returns:
+**2. Restart Cursor**
+
+Cursor loads MCP servers from `mcp.json` when it starts.
+
+**3. Use your agent normally**
+
+Ask Cursor to work on a task in that repo. RepoCtx shows up as an MCP tool, and Cursor can call it when it needs context.
+
+**What you do not need to do**
+
+- You do **not** need to run `python3 -m repoctx.mcp_server ...` yourself.
+- You do **not** need to write a custom skill.
+- You do **not** need to manually paste repo files into chat.
+
+### Claude Desktop
+
+Claude Desktop can use the same RepoCtx MCP server.
+
+**1. Open the Claude Desktop MCP config**
+
+In Claude Desktop, open **Settings > Developer > Edit Config**.
+
+Common config locations:
+
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+
+RepoCtx is intended for the Claude Desktop app, not the web app.
+
+**2. Add RepoCtx**
+
+```json
+{
+  "mcpServers": {
+    "repoctx": {
+      "command": "python3",
+      "args": ["-m", "repoctx.mcp_server", "--repo", "/absolute/path/to/your/repo"]
+    }
+  }
+}
+```
+
+**3. Restart Claude Desktop**
+
+After restart, Claude can call RepoCtx as a tool when it needs repository context.
+
+### Codex
+
+Codex supports MCP in both the CLI and the IDE extension. They share the same config.
+
+**Option A: Add RepoCtx to `config.toml`**
+
+Use one of these locations:
+
+- global config: `~/.codex/config.toml`
+- project config: `.codex/config.toml` in a trusted project
+
+Add:
+
+```toml
+[mcp_servers.repoctx]
+command = "python3"
+args = ["-m", "repoctx.mcp_server", "--repo", "/absolute/path/to/your/repo"]
+```
+
+**Option B: Add it from the Codex CLI**
+
+```bash
+codex mcp add repoctx -- python3 -m repoctx.mcp_server --repo /absolute/path/to/your/repo
+```
+
+You can inspect configured servers with:
+
+```bash
+codex mcp list
+```
+
+If you use the Codex IDE extension, it will read the same MCP configuration.
+
+## What To Ask Your Agent
+
+Once RepoCtx is configured, you can ask your client to do normal development work, for example:
+
+- "Add retry jitter to webhook delivery."
+- "Refactor the auth middleware to support OAuth."
+- "Find the files involved in syncing local env with Vercel."
+- "Show me the tests related to the billing webhook flow."
+
+RepoCtx helps the agent find the most relevant files before it starts editing.
+
+## What RepoCtx Returns
+
+For a task like `"add retry jitter to webhook delivery"`, RepoCtx returns a focused pack like:
 
 ```markdown
 ## Summary
@@ -102,62 +176,84 @@ Identified 2 docs, 2 files, 1 test, and 1 graph neighbor relevant to
 - src/webhook/delivery.py — imported by retry_policy.py
 ```
 
-The JSON format includes the same sections with numeric scores, snippets, and a pre-rendered `context_markdown` field.
+Use `--format json` if you want structured output instead of Markdown.
 
-## Supported Languages & Files
+## FAQ
 
-| Category | Extensions |
-|----------|-----------|
-| Code | `.py` `.ts` `.tsx` `.js` `.jsx` |
-| Config | `.json` `.yaml` `.yml` |
-| Docs | `.md` `.mdc` |
+### Do I need to run a server manually?
 
-Import graph tracing works for Python (`import`/`from`) and TypeScript/JavaScript (`import`/`require`).
+No, not in Cursor, Claude Desktop, or Codex. Those clients start the RepoCtx MCP server for you from the config you provide.
 
-## Configuration
+You would only run `python3 -m repoctx.mcp_server --repo ...` yourself if you were debugging the server directly.
 
-RepoCtx works out of the box with sensible defaults. If you need to tune it, the main knobs are:
+### Do I need to write a skill?
 
-| Setting | Default | What it controls |
-|---------|---------|-----------------|
-| `max_docs` | 6 | Max doc files in context |
-| `max_files` | 8 | Max source files in context |
-| `max_tests` | 6 | Max test files in context |
-| `max_neighbors` | 8 | Max import-graph neighbors |
-| `max_file_bytes` | 16,000 | Max bytes read per file |
+No. RepoCtx is an MCP server, not a skill. Once your client is configured, it becomes an available tool the agent can call.
 
-Directories like `.git`, `node_modules`, `venv`, `__pycache__`, and `dist` are ignored automatically.
+### Do I need one config per repo?
 
-## CLI Reference
+Not necessarily.
 
+- Use a global config if you want RepoCtx available everywhere.
+- Use a project config if you want RepoCtx tied to one repo and shared with teammates.
+
+### Can I test RepoCtx from the terminal first?
+
+Yes. RepoCtx also works as a normal CLI.
+
+```bash
+repoctx "refactor the auth middleware to support OAuth" --repo ./my-app
 ```
-repoctx <task> [options]
+
+## CLI Usage
+
+If you want to use RepoCtx outside an MCP client:
+
+```bash
+python3 -m pip install repoctx-mcp
+repoctx "your task" --repo /path/to/repo
 ```
+
+JSON output:
+
+```bash
+repoctx "your task" --repo /path/to/repo --format json
+```
+
+Module entry point:
+
+```bash
+python3 -m repoctx "your task" --repo /path/to/repo
+```
+
+CLI flags:
 
 | Flag | Description |
 |------|-------------|
-| `--repo PATH` | Repository root (default: current directory) |
-| `--format markdown\|json` | Output format (default: `markdown`) |
+| `--repo PATH` | Repository root to inspect |
+| `--format markdown\|json` | Output format |
 | `--verbose` | Enable debug logging |
 
-You can also run it as a module:
+## Supported Files
 
-```bash
-python3 -m repoctx "your task" --repo ./your-repo
-```
+| Category | Extensions |
+|----------|-----------|
+| Code | `.py`, `.ts`, `.tsx`, `.js`, `.jsx` |
+| Config | `.json`, `.yaml`, `.yml` |
+| Docs | `.md`, `.mdc` |
+
+Import graph expansion works for Python (`import`, `from`) and JavaScript/TypeScript (`import`, `require`).
 
 ## Telemetry
 
-RepoCtx writes local-only JSONL telemetry to `~/.repoctx/telemetry/`. All task text and repo paths are hashed before storage. No data is sent to any external service.
-
-Set `REPOCTX_TELEMETRY_DIR` to change the storage location.
+RepoCtx writes local JSONL telemetry to `~/.repoctx/telemetry/` by default. Task text and repo identifiers are hashed before storage. Set `REPOCTX_TELEMETRY_DIR` to change the storage location.
 
 ## Development
 
 ```bash
 git clone https://github.com/gald33/repoctx.git
 cd repoctx
-pip install -e ".[dev]"
+python3 -m pip install -e ".[dev]"
 python3 -m pytest -q
 ```
 
