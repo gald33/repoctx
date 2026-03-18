@@ -4,12 +4,14 @@ import hashlib
 import json
 import os
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
 
 SCHEMA_VERSION = 1
 REPOCTX_EVENTS_FILE = "repoctx-events.jsonl"
 AGENT_RUNS_FILE = "agent-runs.jsonl"
+EXPERIMENT_RUNS_FILE = "experiment-runs.jsonl"
 DEFAULT_VARIANT = "repoctx"
 DEFAULT_SURFACE = "cli"
 
@@ -42,6 +44,21 @@ def append_jsonl(telemetry_dir: str | Path | None, filename: str, payload: dict[
     with output_path.open("a", encoding="utf-8") as handle:
         handle.write(serialized)
     return output_path
+
+
+def _read_jsonl(telemetry_dir: str | Path | None, filename: str) -> list[dict[str, Any]]:
+    output_path = get_telemetry_dir(telemetry_dir) / filename
+    if not output_path.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in output_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def _decimal_string(value: Decimal | str | float | int) -> str:
+    return str(Decimal(str(value)))
 
 
 def record_repoctx_invocation(
@@ -134,3 +151,93 @@ def record_agent_run(
         "quality_score": quality_score,
     }
     return append_jsonl(telemetry_dir, AGENT_RUNS_FILE, payload)
+
+
+def record_experiment_session(
+    *,
+    telemetry_dir: str | Path | None = None,
+    session_id: str,
+    task_id: str,
+    query: str,
+    repo_root: str | Path,
+    prompt: str,
+    base_commit: str,
+    control_worktree: str | Path,
+    repoctx_worktree: str | Path,
+) -> Path:
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "event_type": "experiment_session",
+        "event_time": utc_now_seconds(),
+        "session_id": session_id,
+        "task_id": task_id,
+        "query_hash": sha256_hex(query),
+        "repo_hash": sha256_hex(str(Path(repo_root).resolve())),
+        "prompt": prompt,
+        "prompt_hash": sha256_hex(prompt),
+        "base_commit": base_commit,
+        "control_worktree": str(Path(control_worktree)),
+        "repoctx_worktree": str(Path(repoctx_worktree)),
+    }
+    return append_jsonl(telemetry_dir, EXPERIMENT_RUNS_FILE, payload)
+
+
+def record_experiment_lane(
+    *,
+    telemetry_dir: str | Path | None = None,
+    session_id: str,
+    task_id: str,
+    lane: Variant,
+    worktree_path: str | Path,
+    cost_before_usd: Decimal | str | float | int,
+    cost_after_usd: Decimal | str | float | int,
+    completion_status: str | None = None,
+    verification_status: str | None = None,
+    outcome_summary: str | None = None,
+    notes: str | None = None,
+    stats: dict[str, Any] | None = None,
+) -> Path:
+    before = Decimal(_decimal_string(cost_before_usd))
+    after = Decimal(_decimal_string(cost_after_usd))
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "event_type": "experiment_lane",
+        "event_time": utc_now_seconds(),
+        "session_id": session_id,
+        "task_id": task_id,
+        "lane": lane,
+        "worktree_path": str(Path(worktree_path)),
+        "cost_before_usd": _decimal_string(before),
+        "cost_after_usd": _decimal_string(after),
+        "cost_delta_usd": _decimal_string(after - before),
+        "completion_status": completion_status,
+        "verification_status": verification_status,
+        "outcome_summary": outcome_summary,
+        "notes": notes,
+        "stats": stats or {},
+    }
+    return append_jsonl(telemetry_dir, EXPERIMENT_RUNS_FILE, payload)
+
+
+def load_experiment_session(
+    *,
+    telemetry_dir: str | Path | None = None,
+    session_id: str,
+) -> dict[str, Any]:
+    session: dict[str, Any] | None = None
+    lanes: dict[str, dict[str, Any]] = {}
+    for payload in _read_jsonl(telemetry_dir, EXPERIMENT_RUNS_FILE):
+        if payload.get("session_id") != session_id:
+            continue
+        if payload.get("event_type") == "experiment_session":
+            session = payload
+        elif payload.get("event_type") == "experiment_lane":
+            lane = payload.get("lane")
+            if lane:
+                lanes[lane] = payload
+    if session is None:
+        raise FileNotFoundError(f"Experiment session not found: {session_id}")
+    return {
+        "session": session,
+        "lanes": lanes,
+    }

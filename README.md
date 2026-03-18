@@ -343,6 +343,89 @@ Import graph expansion works for Python (`import`, `from`) and JavaScript/TypeSc
 
 RepoCtx writes local JSONL telemetry to `~/.repoctx/telemetry/` by default. Task text and repo identifiers are hashed before storage. Set `REPOCTX_TELEMETRY_DIR` to change the storage location.
 
+## Controlled Experiment Mode
+
+RepoCtx can also set up a controlled `control` versus `repoctx` comparison with paired git worktrees.
+
+Start an experiment with one shared prompt:
+
+```bash
+repoctx experiment "refactor the auth middleware to support OAuth"
+```
+
+That command:
+
+- creates two clean worktrees from the same base commit under `.worktrees/`
+- stores the exact prompt text and prompt hash for the session
+- prints the next commands for recording each lane
+
+Record a lane after you finish it:
+
+```bash
+repoctx experiment lane record --session-id <session-id> --lane control --before 12.41 --after 12.89
+repoctx experiment lane record --session-id <session-id> --lane repoctx --before 12.89 --after 13.02
+```
+
+If you leave out `--before` or `--after`, RepoCtx prompts for the values interactively.
+
+Then summarize the result:
+
+```bash
+repoctx experiment summarize --session-id <session-id>
+```
+
+Example summary:
+
+```text
+Experiment summary
+Task: refactor the auth middleware to support OAuth
+Session: abc123
+Base commit: 7f2c9a1
+Prompt hash: 6f...
+
+control
+before: $12.41
+after:  $12.89
+delta:  $0.48
+files changed: 3
+lines added/deleted: 18/4
+completion: completed
+verification: passed
+
+repoctx
+before: $12.89
+after:  $13.02
+delta:  $0.13
+files changed: 2
+lines added/deleted: 11/3
+completion: completed
+verification: passed
+
+difference
+repoctx saved: $0.35
+repoctx saved: 72.9%
+winner: repoctx
+```
+
+What the experiment measures:
+
+- manual before/after total cost checkpoints from your agent UI
+- git-derived change statistics from each isolated worktree
+- optional completion and verification status you provide when recording a lane
+
+Controlled experiment assumptions:
+
+- both lanes must use the exact same prompt
+- both lanes start from the same base commit
+- each lane runs in its own worktree
+- cost is entered manually from the external agent UI
+
+Current limitations:
+
+- RepoCtx does not measure external agent time automatically
+- quality is not scored automatically
+- cost accuracy depends on the numbers you enter for each lane
+
 ## Development
 
 ```bash
