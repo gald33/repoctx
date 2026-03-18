@@ -1,7 +1,14 @@
 import json
+from decimal import Decimal
 from pathlib import Path
 
-from repoctx.telemetry import record_agent_run, record_repoctx_invocation
+from repoctx.telemetry import (
+    load_experiment_session,
+    record_agent_run,
+    record_experiment_lane,
+    record_experiment_session,
+    record_repoctx_invocation,
+)
 
 
 def test_record_repoctx_invocation_writes_jsonl(tmp_path: Path) -> None:
@@ -78,3 +85,92 @@ def test_record_agent_run_writes_jsonl(tmp_path: Path) -> None:
     assert isinstance(payload["completion_tokens"], int)
     assert isinstance(payload["total_tokens"], int)
     assert isinstance(payload["estimated_cost_usd"], float)
+
+
+def test_record_experiment_session_writes_jsonl(tmp_path: Path) -> None:
+    telemetry_dir = tmp_path / "telemetry"
+
+    record_experiment_session(
+        telemetry_dir=telemetry_dir,
+        session_id="session-1",
+        task_id="task-1",
+        query="add retry jitter",
+        repo_root=tmp_path,
+        prompt="Use the exact same prompt in both lanes.",
+        base_commit="abc1234",
+        control_worktree=tmp_path / ".worktrees" / "control",
+        repoctx_worktree=tmp_path / ".worktrees" / "repoctx",
+    )
+
+    event_path = telemetry_dir / "experiment-runs.jsonl"
+    assert event_path.exists()
+    payload = json.loads(event_path.read_text(encoding="utf-8").strip())
+
+    assert payload["event_type"] == "experiment_session"
+    assert payload["session_id"] == "session-1"
+    assert payload["task_id"] == "task-1"
+    assert payload["prompt"] == "Use the exact same prompt in both lanes."
+    assert payload["prompt_hash"] != payload["prompt"]
+    assert payload["repo_hash"] != str(tmp_path)
+    assert payload["control_worktree"].endswith("/control")
+    assert payload["repoctx_worktree"].endswith("/repoctx")
+
+
+def test_record_experiment_lane_writes_jsonl_and_loads_session(tmp_path: Path) -> None:
+    telemetry_dir = tmp_path / "telemetry"
+    control_path = tmp_path / ".worktrees" / "control"
+    repoctx_path = tmp_path / ".worktrees" / "repoctx"
+
+    record_experiment_session(
+        telemetry_dir=telemetry_dir,
+        session_id="session-1",
+        task_id="task-1",
+        query="add retry jitter",
+        repo_root=tmp_path,
+        prompt="Use the exact same prompt in both lanes.",
+        base_commit="abc1234",
+        control_worktree=control_path,
+        repoctx_worktree=repoctx_path,
+    )
+    record_experiment_lane(
+        telemetry_dir=telemetry_dir,
+        session_id="session-1",
+        task_id="task-1",
+        lane="control",
+        worktree_path=control_path,
+        cost_before_usd=Decimal("12.41"),
+        cost_after_usd=Decimal("12.89"),
+        completion_status="completed",
+        verification_status="passed",
+        outcome_summary="Implemented the feature.",
+        notes="No issues.",
+        stats={
+            "files_changed": 2,
+            "lines_added": 18,
+            "lines_deleted": 4,
+            "net_lines": 14,
+            "new_files": 1,
+            "modified_files": 1,
+            "source_files_changed": 1,
+            "test_files_changed": 1,
+            "docs_files_changed": 0,
+            "config_files_changed": 0,
+        },
+    )
+
+    lines = (telemetry_dir / "experiment-runs.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    payload = json.loads(lines[-1])
+
+    assert payload["event_type"] == "experiment_lane"
+    assert payload["lane"] == "control"
+    assert payload["cost_before_usd"] == "12.41"
+    assert payload["cost_after_usd"] == "12.89"
+    assert payload["cost_delta_usd"] == "0.48"
+    assert payload["stats"]["files_changed"] == 2
+
+    session = load_experiment_session(telemetry_dir=telemetry_dir, session_id="session-1")
+
+    assert session["session"]["prompt_hash"] == session["session"]["prompt_hash"]
+    assert session["lanes"]["control"]["cost_delta_usd"] == "0.48"
+    assert session["lanes"]["control"]["verification_status"] == "passed"
+    assert "repoctx" not in session["lanes"]
