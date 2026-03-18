@@ -16,6 +16,7 @@ IGNORED_DIRS = (
     ".git",
     ".hg",
     ".mypy_cache",
+    ".repoctx",
     ".worktrees",
     ".svn",
     ".next",
@@ -91,6 +92,18 @@ class RepoCtxConfig:
     max_files: int = 8
     max_tests: int = 6
     max_neighbors: int = 8
+    embedding_weight: float = 12.0
+    embedding_qualify_threshold: float = 0.3
 
 
 DEFAULT_CONFIG = RepoCtxConfig()
+
+
+@dataclass(frozen=True, slots=True)
+class EmbeddingConfig:
+    model_name: str = "Qwen/Qwen3-Embedding-0.6B"
+    max_content_chars: int = 8000
+    index_dir: str = ".repoctx"
+
+
+DEFAULT_EMBEDDING_CONFIG = EmbeddingConfig()

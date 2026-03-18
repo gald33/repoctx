@@ -40,11 +40,20 @@ class RankedPath:
     reason: str
     score: float
     snippet: str | None = None
+    heuristic_score: float = 0.0
+    embedding_score: float = 0.0
 
-    def to_dict(self) -> dict[str, Any]:
-        data = asdict(self)
-        if data["snippet"] is None:
-            data.pop("snippet")
+    def to_dict(self, include_debug: bool = False) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "path": self.path,
+            "reason": self.reason,
+            "score": self.score,
+        }
+        if self.snippet is not None:
+            data["snippet"] = self.snippet
+        if include_debug:
+            data["heuristic_score"] = round(self.heuristic_score, 3)
+            data["embedding_score"] = round(self.embedding_score, 3)
         return data
 
 
@@ -78,13 +87,17 @@ class ContextResponse:
     context_markdown: str
     metrics: ContextMetrics = field(default_factory=ContextMetrics)
 
-    def to_dict(self, include_metrics: bool = False) -> dict[str, Any]:
+    def to_dict(
+        self,
+        include_metrics: bool = False,
+        include_debug: bool = False,
+    ) -> dict[str, Any]:
         data = {
             "summary": self.summary,
-            "relevant_docs": [item.to_dict() for item in self.relevant_docs],
-            "relevant_files": [item.to_dict() for item in self.relevant_files],
-            "related_tests": [item.to_dict() for item in self.related_tests],
-            "graph_neighbors": [item.to_dict() for item in self.graph_neighbors],
+            "relevant_docs": [item.to_dict(include_debug) for item in self.relevant_docs],
+            "relevant_files": [item.to_dict(include_debug) for item in self.relevant_files],
+            "related_tests": [item.to_dict(include_debug) for item in self.related_tests],
+            "graph_neighbors": [item.to_dict(include_debug) for item in self.graph_neighbors],
             "context_markdown": self.context_markdown,
         }
         if include_metrics:

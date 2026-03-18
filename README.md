@@ -262,6 +262,72 @@ CLI flags:
 | `--repo PATH` | Optional repository root override |
 | `--format markdown\|json` | Output format |
 | `--verbose` | Enable debug logging |
+| `--debug-scores` | Print heuristic/embedding/final score breakdown |
+| `--no-embeddings` | Disable embedding retrieval for this query |
+
+## Embedding-Based Retrieval (v2)
+
+RepoCtx v2 adds optional local embeddings using [Qwen3-Embedding-0.6B](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B) to improve recall when your task description doesn't match filenames or code tokens.
+
+Embeddings are additive — the existing heuristic ranking (token overlap, doc priority, graph expansion) still runs. Embedding similarity scores are blended in as a boost, and files with strong semantic similarity can surface even without token overlap.
+
+### Install embedding dependencies
+
+```bash
+pip install "repoctx-mcp[embeddings]"
+```
+
+This installs `sentence-transformers` and `numpy`. The model weights (~1.2 GB) are downloaded automatically on first use.
+
+### Build the embedding index
+
+```bash
+repoctx index --repo /path/to/repo
+```
+
+This scans the repository, embeds every file (with enriched metadata), and writes the index to `.repoctx/embeddings/` inside the repo. Add `.repoctx/` to your `.gitignore`.
+
+### Query with hybrid retrieval
+
+Once the index exists, all queries automatically use hybrid retrieval:
+
+```bash
+repoctx "refactor payment processing" --repo /path/to/repo
+```
+
+To see the score breakdown:
+
+```bash
+repoctx query "refactor payment processing" --repo /path/to/repo --debug-scores
+```
+
+### Update a single file
+
+After editing a file, you can re-embed just that file:
+
+```bash
+repoctx update src/billing/invoice.py --repo /path/to/repo
+```
+
+### Rebuild the index from scratch
+
+```bash
+repoctx rebuild --repo /path/to/repo
+```
+
+### How hybrid scoring works
+
+For each candidate file, the final score is:
+
+```
+final_score = heuristic_score + embedding_weight × max(0, cosine_similarity)
+```
+
+Default `embedding_weight` is 12.0. Files with cosine similarity above 0.3 bypass heuristic filters, so semantically relevant files surface even without keyword matches.
+
+### Fallback behavior
+
+If embedding dependencies are not installed or no index exists, RepoCtx silently falls back to pure heuristic retrieval. The MCP tool contract is unchanged — `get_task_context(task)` always works.
 
 ## Supported Files
 
@@ -284,6 +350,12 @@ git clone https://github.com/gald33/repoctx.git
 cd repoctx
 python3 -m pip install -e ".[dev]"
 python3 -m pytest -q
+```
+
+To develop with embedding support:
+
+```bash
+python3 -m pip install -e ".[dev,embeddings]"
 ```
 
 ## License

@@ -2,5 +2,7 @@
 .pytest_cache/
 *.egg-info/
 __pycache__/
+.worktrees/
+.repoctx/
 build/
 dist/

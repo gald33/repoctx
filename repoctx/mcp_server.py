@@ -23,14 +23,28 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
     resolved_root = Path(repo_root).resolve() if repo_root is not None else Path.cwd().resolve()
     server = FastMCP("repoctx")
 
+    embedding_retriever = _try_load_embeddings(resolved_root)
+
     @server.tool()
     def get_task_context(task: str) -> dict[str, object]:
         logger.info("Building context for task '%s' in %s", task, resolved_root)
         started = perf_counter()
         session_id = uuid4().hex
         task_id = uuid4().hex
+
+        embedding_scores: dict[str, float] | None = None
+        if embedding_retriever is not None:
+            try:
+                embedding_scores = embedding_retriever.query_scores(task)
+            except Exception:
+                logger.debug("Embedding scoring failed, continuing with heuristic only", exc_info=True)
+
         try:
-            response = repo_get_task_context(task=task, repo_root=resolved_root)
+            response = repo_get_task_context(
+                task=task,
+                repo_root=resolved_root,
+                embedding_scores=embedding_scores,
+            )
         except Exception as exc:
             _record_mcp_telemetry(
                 telemetry_dir=telemetry_dir,
@@ -59,6 +73,20 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
         return response.to_dict()
 
     return server
+
+
+def _try_load_embeddings(repo_root: Path):
+    """Best-effort load of embedding retriever at server start."""
+    try:
+        from repoctx.embeddings import try_load_retriever
+
+        retriever = try_load_retriever(repo_root)
+        if retriever is not None:
+            logger.info("Embedding retriever loaded for %s", repo_root)
+        return retriever
+    except Exception:
+        logger.debug("Embeddings not available for MCP server", exc_info=True)
+        return None
 
 
 def main() -> None:
