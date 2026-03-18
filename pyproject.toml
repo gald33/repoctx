@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "repoctx-mcp"
-version = "0.1.1"
+version = "0.2.0"
 description = "Local repository intelligence for coding agents"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -32,9 +32,14 @@ Issues = "https://github.com/gald33/repoctx/issues"
 mcp = [
   "mcp>=1.6,<1.7",
 ]
+embeddings = [
+  "sentence-transformers>=3.0.0",
+  "numpy>=1.24.0",
+]
 dev = [
   "build",
   "mcp>=1.6,<1.7",
+  "numpy>=1.24.0",
   "pytest>=8.0.0",
 ]
 

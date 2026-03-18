@@ -1,3 +1,4 @@
+import logging
 import re
 from pathlib import Path
 from time import perf_counter
@@ -8,6 +9,8 @@ from repoctx.graph import build_dependency_graph, expand_graph_neighbors
 from repoctx.models import ContextMetrics, ContextResponse, DependencyGraph, FileRecord, RankedPath, RepositoryIndex
 from repoctx.scanner import scan_repository
 
+logger = logging.getLogger(__name__)
+
 TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
 
 
@@ -15,12 +18,16 @@ def get_task_context(
     task: str,
     repo_root: str | Path = ".",
     config: RepoCtxConfig = DEFAULT_CONFIG,
+    embedding_scores: dict[str, float] | None = None,
 ) -> ContextResponse:
     scan_started = perf_counter()
     index = scan_repository(repo_root, config=config)
     scan_duration_ms = int((perf_counter() - scan_started) * 1000)
     graph = build_dependency_graph(index)
-    response = get_task_context_data(task=task, index=index, graph=graph, config=config)
+    response = get_task_context_data(
+        task=task, index=index, graph=graph, config=config,
+        embedding_scores=embedding_scores,
+    )
     response.metrics.files_considered = len(index.records)
     response.metrics.scan_duration_ms = scan_duration_ms
     return response
@@ -31,9 +38,10 @@ def get_task_context_data(
     index: RepositoryIndex,
     graph: DependencyGraph,
     config: RepoCtxConfig = DEFAULT_CONFIG,
+    embedding_scores: dict[str, float] | None = None,
 ) -> ContextResponse:
-    relevant_docs = rank_documents(index, task, config)
-    relevant_files = rank_files(index, task, config)
+    relevant_docs = rank_documents(index, task, config, embedding_scores)
+    relevant_files = rank_files(index, task, config, embedding_scores)
     related_tests = find_related_tests(index, relevant_files, graph, config)
     graph_neighbors = expand_graph_neighbors(
         index=index,
@@ -66,6 +74,7 @@ def rank_documents(
     index: RepositoryIndex,
     task: str,
     config: RepoCtxConfig = DEFAULT_CONFIG,
+    embedding_scores: dict[str, float] | None = None,
 ) -> list[RankedPath]:
     task_tokens = set(tokenize(task))
     ranked: list[RankedPath] = []
@@ -76,11 +85,18 @@ def rank_documents(
         path_overlap = sorted(task_tokens & file_tokens)
         content_overlap = sorted(task_tokens & content_tokens)
         overlap = sorted(task_tokens & (file_tokens | content_tokens))
-        score = record.doc_score + (4.0 * len(path_overlap)) + (1.0 * len(content_overlap))
-        if not overlap and record.doc_score < 12.0:
-            continue
-        if not path_overlap and len(content_overlap) < 2 and record.doc_score < 12.0:
-            continue
+        heuristic_score = record.doc_score + (4.0 * len(path_overlap)) + (1.0 * len(content_overlap))
+
+        emb_score = (embedding_scores or {}).get(record.path, 0.0)
+        emb_boost = config.embedding_weight * max(0.0, emb_score) if embedding_scores else 0.0
+        score = heuristic_score + emb_boost
+
+        has_emb_signal = embedding_scores is not None and emb_score >= config.embedding_qualify_threshold
+        if not has_emb_signal:
+            if not overlap and record.doc_score < 12.0:
+                continue
+            if not path_overlap and len(content_overlap) < 2 and record.doc_score < 12.0:
+                continue
         if score <= 0:
             continue
         reason = _build_reason(
@@ -93,6 +109,8 @@ def rank_documents(
                 reason=reason,
                 score=score,
                 snippet=_select_snippet(record, overlap),
+                heuristic_score=heuristic_score,
+                embedding_score=emb_score,
             )
         )
 
@@ -104,6 +122,7 @@ def rank_files(
     index: RepositoryIndex,
     task: str,
     config: RepoCtxConfig = DEFAULT_CONFIG,
+    embedding_scores: dict[str, float] | None = None,
 ) -> list[RankedPath]:
     task_tokens = set(tokenize(task))
     ranked: list[RankedPath] = []
@@ -117,11 +136,18 @@ def rank_files(
         name_overlap = sorted(task_tokens & name_tokens)
         path_overlap = sorted(task_tokens & path_tokens)
         content_overlap = sorted(task_tokens & content_tokens)
-        score = (6.0 * len(name_overlap)) + (3.0 * len(path_overlap)) + (1.0 * len(content_overlap))
+        heuristic_score = (6.0 * len(name_overlap)) + (3.0 * len(path_overlap)) + (1.0 * len(content_overlap))
         if record.kind == "config":
-            score *= 0.5
-        if not (name_overlap or path_overlap) and len(content_overlap) < 2:
-            continue
+            heuristic_score *= 0.5
+
+        emb_score = (embedding_scores or {}).get(record.path, 0.0)
+        emb_boost = config.embedding_weight * max(0.0, emb_score) if embedding_scores else 0.0
+        score = heuristic_score + emb_boost
+
+        has_emb_signal = embedding_scores is not None and emb_score >= config.embedding_qualify_threshold
+        if not has_emb_signal:
+            if not (name_overlap or path_overlap) and len(content_overlap) < 2:
+                continue
         if score <= 0:
             continue
         overlap = name_overlap or path_overlap or content_overlap
@@ -135,6 +161,8 @@ def rank_files(
                 reason=reason,
                 score=score,
                 snippet=_select_snippet(record, overlap),
+                heuristic_score=heuristic_score,
+                embedding_score=emb_score,
             )
         )
 
