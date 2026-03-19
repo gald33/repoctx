@@ -277,3 +277,22 @@ def test_cli_records_failure_telemetry_and_exits(tmp_path: Path, monkeypatch) ->
     telemetry_payload = json.loads(event_path.read_text(encoding="utf-8").strip())
     assert "query" not in telemetry_payload
     assert "repo_root" not in telemetry_payload
+
+
+def test_cli_help_includes_examples_and_subcommand_guidance(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(sys, "argv", ["repoctx", "--help"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        repoctx_main.main()
+
+    assert exc_info.value.code == 0
+    stdout = capsys.readouterr().out
+    assert "usage: repoctx [-h] TASK" in stdout
+    assert "Examples:" in stdout
+    assert 'repoctx "refactor the auth middleware to support OAuth"' in stdout
+    assert "repoctx query \"show me tests related to the billing webhook flow\" --repo /path/to/repo --format json" in stdout
+    assert "Use `repoctx query TASK [flags]` when you need query-specific options." in stdout
+    assert "repoctx experiment \"refactor the auth middleware to support OAuth\"" in stdout
+    assert "Common subcommands:" in stdout
+    assert "query" in stdout
+    assert "experiment" in stdout

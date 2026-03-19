@@ -21,13 +21,37 @@ logger = logging.getLogger(__name__)
 
 SUBCOMMANDS = {"query", "index", "update", "rebuild", "experiment"}
 EXPERIMENT_SUBCOMMANDS = {"start", "lane", "summarize"}
+HELP_USAGE = """repoctx [-h] TASK
+       repoctx [-h] COMMAND ..."""
+HELP_EPILOG = """Default behavior:
+  If the first argument is not a subcommand, RepoCtx treats it as `query`.
+
+Examples:
+  repoctx "refactor the auth middleware to support OAuth"
+  repoctx query "show me tests related to the billing webhook flow" --repo /path/to/repo --format json
+  repoctx index --repo /path/to/repo
+  repoctx experiment "refactor the auth middleware to support OAuth"
+
+Common workflows:
+  Use `repoctx TASK` for the default query shorthand.
+  Use `repoctx query TASK [flags]` when you need query-specific options.
+  Run `repoctx COMMAND --help` for command-specific flags and examples.
+"""
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Local repository intelligence for coding agents",
+        usage=HELP_USAGE,
+        epilog=HELP_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    sub = parser.add_subparsers(dest="command")
+    sub = parser.add_subparsers(
+        dest="command",
+        title="Common subcommands",
+        metavar="COMMAND",
+        description="Use `repoctx COMMAND --help` for command-specific usage.",
+    )
 
     # -- query (default when first arg isn't a subcommand) --------------------
     q = sub.add_parser("query", help="Retrieve task context (default)")

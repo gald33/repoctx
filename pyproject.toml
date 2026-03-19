@@ -47,5 +47,8 @@ dev = [
 [project.scripts]
 repoctx = "repoctx.main:main"
 
+[tool.setuptools.data-files]
+"share/man/man1" = ["docs/man/repoctx.1"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
