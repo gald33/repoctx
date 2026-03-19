@@ -345,34 +345,50 @@ RepoCtx writes local JSONL telemetry to `~/.repoctx/telemetry/` by default. Task
 
 ## Controlled Experiment Mode
 
-RepoCtx can also set up a controlled `control` versus `repoctx` comparison with paired git worktrees.
+RepoCtx can also run a guided `control` versus `treatment` comparison with paired git worktrees.
 
-Start an experiment with one shared prompt:
+Start or resume the experiment with one command:
+
+```bash
+repoctx experiment
+```
+
+The first run launches a wizard that:
+
+- collects one shared prompt for both lanes
+- creates two clean worktrees from the same base commit under `.worktrees/`
+- stores the exact prompt text and prompt hash for the session
+- hands you off to the `control` worktree first
+
+When you rerun `repoctx experiment`, RepoCtx resumes automatically:
+
+- after the control run, it records the control costs and result fields, then prepares the `treatment` worktree
+- for the treatment lane, it writes `.cursor/mcp.json` in that worktree so RepoCtx MCP is enabled there
+- after the treatment run, it records the final lane and prints the summary automatically
+
+Fast path is still available if you already know the shared prompt:
 
 ```bash
 repoctx experiment "refactor the auth middleware to support OAuth"
 ```
 
-That command:
+The wizard asks for `cost before` and `cost after` for each lane so RepoCtx can calculate the delta for you.
 
-- creates two clean worktrees from the same base commit under `.worktrees/`
-- stores the exact prompt text and prompt hash for the session
-- prints the next commands for recording each lane
+### Experiment MCP suppression (control lane)
 
-Record a lane after you finish it:
+During the **control** lane, RepoCtx can **stub MCP tool results** (empty context + short message) so agents do not get RepoCtx retrieval even when RepoCtx remains registered in Cursor’s global `mcp.json`. Normal day-to-day use is unchanged; only the guided experiment arms this mode.
 
-```bash
-repoctx experiment lane record --session-id <session-id> --lane control --before 12.41 --after 12.89
-repoctx experiment lane record --session-id <session-id> --lane repoctx --before 12.89 --after 13.02
-```
+Timing is controlled with `~/.repoctx/config.json` (override the path with `REPOCTX_CONFIG_PATH` if needed):
 
-If you leave out `--before` or `--after`, RepoCtx prompts for the values interactively.
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `experiment_mcp_suppress` | `true` | Set `false` to disable arming entirely (you then only get the legacy warning if global Cursor config still enables RepoCtx). |
+| `experiment_mcp_idle_ttl_seconds` | `90` | Auto-clear suppression after this many seconds with **no** `repoctx` CLI activity (safety net if a run is abandoned). |
+| `experiment_mcp_extend_seconds` | `600` | Each `repoctx` CLI run while suppression is active extends the deadline by this many seconds so long wizard sessions stay covered. |
 
-Then summarize the result:
+State is stored next to telemetry (`~/.repoctx/telemetry/experiment-mcp-suppress.json` unless `REPOCTX_TELEMETRY_DIR` is set). Suppression is cleared when you **record a lane**, **start the treatment handoff**, or when the idle deadline passes (checked on every MCP tool call and every CLI entry).
 
-```bash
-repoctx experiment summarize --session-id <session-id>
-```
+More detail: **[docs/experiment-mcp-suppression.md](docs/experiment-mcp-suppression.md)**. For **AI agents** working in this repo or advising users: **[AGENTS.md](AGENTS.md)**.
 
 Example summary:
 
@@ -392,7 +408,7 @@ lines added/deleted: 18/4
 completion: completed
 verification: passed
 
-repoctx
+treatment
 before: $12.89
 after:  $13.02
 delta:  $0.13
@@ -402,9 +418,9 @@ completion: completed
 verification: passed
 
 difference
-repoctx saved: $0.35
-repoctx saved: 72.9%
-winner: repoctx
+treatment saved: $0.35
+treatment saved: 72.9%
+winner: treatment
 ```
 
 What the experiment measures:

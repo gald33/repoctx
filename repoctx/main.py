@@ -8,26 +8,67 @@ from time import perf_counter
 from uuid import uuid4
 
 from repoctx.config import DEFAULT_EMBEDDING_CONFIG
-from repoctx.experiment import collect_git_diff_stats, create_experiment_worktrees
+from repoctx.experiment import (
+    build_experiment_prompt,
+    collect_git_diff_stats,
+    create_experiment_session,
+)
+from repoctx.experiment_mcp import (
+    arm_control_lane_mcp_suppression,
+    clear_mcp_suppression,
+    control_lane_suppression_notice,
+    refresh_after_cli_invocation,
+)
 from repoctx.retriever import get_task_context
 from repoctx.telemetry import (
+    clear_active_experiment,
+    load_active_experiment,
     load_experiment_session,
     record_experiment_lane,
-    record_experiment_session,
     record_repoctx_invocation,
+    save_active_experiment,
 )
 
 logger = logging.getLogger(__name__)
 
 SUBCOMMANDS = {"query", "index", "update", "rebuild", "experiment"}
 EXPERIMENT_SUBCOMMANDS = {"start", "lane", "summarize"}
+HELP_USAGE = """repoctx [-h] TASK
+       repoctx [-h] COMMAND ..."""
+EXPERIMENT_HELP_USAGE = """repoctx experiment [--repo REPO]
+       repoctx experiment "TASK PROMPT" [--repo REPO]
+       repoctx experiment {start,lane,summarize} ..."""
+HELP_EPILOG = """Default behavior:
+  If the first argument is not a subcommand, RepoCtx treats it as `query`.
+
+Examples:
+  repoctx "refactor the auth middleware to support OAuth"
+  repoctx query "show me tests related to the billing webhook flow" --repo /path/to/repo --format json
+  repoctx index --repo /path/to/repo
+  repoctx experiment
+  repoctx experiment "refactor the auth middleware to support OAuth"
+
+Common workflows:
+  Use `repoctx TASK` for the default query shorthand.
+  Use `repoctx query TASK [flags]` when you need query-specific options.
+  Use `repoctx experiment` to launch or resume the guided experiment flow.
+  Run `repoctx COMMAND --help` for command-specific flags and examples.
+"""
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Local repository intelligence for coding agents",
+        usage=HELP_USAGE,
+        epilog=HELP_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    sub = parser.add_subparsers(dest="command")
+    sub = parser.add_subparsers(
+        dest="command",
+        title="Common subcommands",
+        metavar="COMMAND",
+        description="Use `repoctx COMMAND --help` for command-specific usage.",
+    )
 
     # -- query (default when first arg isn't a subcommand) --------------------
     q = sub.add_parser("query", help="Retrieve task context (default)")
@@ -64,12 +105,25 @@ def build_parser() -> argparse.ArgumentParser:
     rb.add_argument("--verbose", action="store_true")
 
     # -- experiment -----------------------------------------------------------
-    exp = sub.add_parser("experiment", help="Run a controlled control-vs-repoctx experiment")
+    exp = sub.add_parser(
+        "experiment",
+        help="Run a controlled control-vs-repoctx experiment",
+        description="Launch or resume the guided experiment flow.",
+        usage=EXPERIMENT_HELP_USAGE,
+        epilog=(
+            "Examples:\n"
+            "  repoctx experiment\n"
+            "  repoctx experiment --repo /path/to/repo\n"
+            "  repoctx experiment \"refactor the auth middleware to support OAuth\"\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    exp.add_argument("--repo", default=".", help="Repository root for wizard mode")
     exp_sub = exp.add_subparsers(dest="experiment_command")
 
     exp_start = exp_sub.add_parser("start", help="Create experiment session and paired worktrees")
     exp_start.add_argument("task", help="Task prompt to use for both lanes")
-    exp_start.add_argument("--repo", default=".", help="Repository root")
+    exp_start.add_argument("--repo", default=argparse.SUPPRESS, help="Repository root")
 
     exp_lane = exp_sub.add_parser("lane", help="Record one experiment lane")
     lane_sub = exp_lane.add_subparsers(dest="lane_command")
@@ -94,6 +148,7 @@ def main() -> None:
     _ensure_default_subcommand()
     parser = build_parser()
     args = parser.parse_args()
+    refresh_after_cli_invocation()
     logging.basicConfig(level=logging.DEBUG if getattr(args, "verbose", False) else logging.WARNING)
 
     cmd = args.command or "query"
@@ -117,11 +172,21 @@ def _ensure_default_subcommand() -> None:
     if len(sys.argv) < 2:
         return
     first = sys.argv[1]
-    if first == "experiment" and len(sys.argv) >= 3:
-        second = sys.argv[2]
-        if second not in EXPERIMENT_SUBCOMMANDS and not second.startswith("-"):
-            sys.argv.insert(2, "start")
+    if first == "experiment":
+        idx = 2
+        while idx < len(sys.argv):
+            token = sys.argv[idx]
+            if token in EXPERIMENT_SUBCOMMANDS or token in {"-h", "--help"}:
+                return
+            if token == "--repo":
+                idx += 2
+                continue
+            if token.startswith("-"):
+                idx += 1
+                continue
+            sys.argv.insert(idx, "start")
             return
+        return
     if first not in SUBCOMMANDS and not first.startswith("-"):
         sys.argv.insert(1, "query")
 
@@ -210,7 +275,7 @@ def _cmd_experiment(args: argparse.Namespace) -> None:
     if args.experiment_command == "summarize":
         _cmd_experiment_summarize(args)
         return
-    raise SystemExit(1)
+    _cmd_experiment_resume_or_start(args)
 
 
 # -- helpers -------------------------------------------------------------------
@@ -235,84 +300,103 @@ def _build_and_save_index(repo: Path) -> None:
 
 
 def _cmd_experiment_start(args: argparse.Namespace) -> None:
-    repo = Path(args.repo).resolve()
+    repo = _normalize_experiment_repo_root(Path(args.repo).resolve())
     session_id = uuid4().hex
     task_id = uuid4().hex
-    session = create_experiment_worktrees(repo, session_id=session_id)
-    record_experiment_session(
+    session = create_experiment_session(
+        repo,
         session_id=session_id,
         task_id=task_id,
+        task_prompt=args.task,
         query=args.task,
-        repo_root=repo,
-        prompt=args.task,
-        base_commit=session["base_commit"],
-        control_worktree=session["control_worktree"],
-        repoctx_worktree=session["repoctx_worktree"],
     )
-    print("Experiment created")
-    print(f"Task: {args.task}")
-    print(f"Session: {session_id}")
-    print(f"Base commit: {session['base_commit']}")
+    save_active_experiment(session_id=session_id, repo_root=repo)
+    _print_experiment_created(session_id=session_id, session=session)
+
+
+def _cmd_experiment_resume_or_start(args: argparse.Namespace) -> None:
+    current_repo = _normalize_experiment_repo_root(Path(args.repo).resolve())
+    active = load_active_experiment(repo_root=current_repo)
+    if active is None:
+        _cmd_experiment_wizard(args)
+        return
+    try:
+        experiment = load_experiment_session(session_id=active["session_id"])
+    except FileNotFoundError:
+        clear_active_experiment(repo_root=current_repo)
+        _cmd_experiment_wizard(args)
+        return
+    _cmd_experiment_continue(session_id=active["session_id"], experiment=experiment)
+
+
+def _cmd_experiment_wizard(args: argparse.Namespace) -> None:
+    repo = _normalize_experiment_repo_root(Path(args.repo).resolve())
+    print("Experiment setup wizard")
+    print("Press Enter to skip optional fields. Finish the prompt with a blank line.")
     print("")
-    print("Use this exact prompt in both lanes:")
-    print(args.task)
+
+    label = input("Optional label: ").strip() or None
+    guardrail_mode = _prompt_guardrail_mode()
+    prompt = _prompt_multiline_task()
+    final_prompt = build_experiment_prompt(prompt, guardrail_mode=guardrail_mode)
     print("")
-    print(f"Control worktree: {session['control_worktree']}")
-    print(f"RepoCtx worktree: {session['repoctx_worktree']}")
+    print("Confirm experiment setup")
+    print(f"Repo: {repo}")
+    print(f"Label: {label or '(none)'}")
+    print(f"Guardrails: {guardrail_mode}")
+    print("Prompt preview:")
+    print(final_prompt)
     print("")
-    print("Record each lane with:")
-    print(f"repoctx experiment lane record --session-id {session_id} --lane control")
-    print(f"repoctx experiment lane record --session-id {session_id} --lane repoctx")
-    print("")
-    print("See the comparison with:")
-    print(f"repoctx experiment summarize --session-id {session_id}")
+    if not _prompt_yes_no("Create experiment with this setup? [y/N]: ", default=False):
+        print("Experiment setup cancelled.")
+        raise SystemExit(1)
+
+    session_id = uuid4().hex
+    task_id = uuid4().hex
+    session = create_experiment_session(
+        repo,
+        session_id=session_id,
+        task_id=task_id,
+        task_prompt=prompt,
+        query=prompt,
+        label=label,
+        guardrail_mode=guardrail_mode,
+    )
+    save_active_experiment(session_id=session_id, repo_root=repo)
+    _print_experiment_created(session_id=session_id, session=session)
+
+
+def _cmd_experiment_continue(*, session_id: str, experiment: dict[str, object]) -> None:
+    lanes = experiment["lanes"]
+    if "control" not in lanes:
+        _print_lane_recording_reminder(experiment["session"], lane="control")
+        _prompt_and_record_lane(session_id=session_id, experiment=experiment, lane="control")
+        refreshed = load_experiment_session(session_id=session_id)
+        _print_lane_handoff(refreshed["session"], lane="repoctx")
+        return
+    if "repoctx" not in lanes:
+        _print_lane_recording_reminder(experiment["session"], lane="repoctx")
+        _prompt_and_record_lane(session_id=session_id, experiment=experiment, lane="repoctx")
+        clear_active_experiment(repo_root=_experiment_repo_root(experiment["session"]))
+        _cmd_experiment_summarize(argparse.Namespace(session_id=session_id))
+        return
+    clear_active_experiment(repo_root=_experiment_repo_root(experiment["session"]))
+    _cmd_experiment_summarize(argparse.Namespace(session_id=session_id))
 
 
 def _cmd_experiment_lane_record(args: argparse.Namespace) -> None:
     experiment = load_experiment_session(session_id=args.session_id)
-    if args.lane in experiment["lanes"] and not args.overwrite:
-        print(
-            f"Lane '{args.lane}' already recorded for session {args.session_id}. "
-            "Pass --overwrite to record it again.",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
-
-    before = _parse_cost_or_prompt(
-        raw_value=args.before,
-        prompt_text=f"Enter the total cost before starting the {args.lane} lane (USD): ",
-    )
-    after = _parse_cost_or_prompt(
-        raw_value=args.after,
-        prompt_text=f"Enter the total cost after finishing the {args.lane} lane (USD): ",
-    )
-    if before < 0 or after < 0:
-        print("Costs must be non-negative.", file=sys.stderr)
-        raise SystemExit(1)
-    if after < before:
-        print("The after cost must be greater than or equal to the before cost.", file=sys.stderr)
-        raise SystemExit(1)
-
-    session_data = experiment["session"]
-    worktree_path = Path(session_data[f"{args.lane}_worktree"])
-    stats = collect_git_diff_stats(worktree_path, session_data["base_commit"])
-    record_experiment_lane(
+    _record_lane_result(
         session_id=args.session_id,
-        task_id=session_data["task_id"],
+        experiment=experiment,
         lane=args.lane,
-        worktree_path=worktree_path,
-        cost_before_usd=before,
-        cost_after_usd=after,
+        before_raw=args.before,
+        after_raw=args.after,
         completion_status=args.completion_status,
         verification_status=args.verification_status,
         outcome_summary=args.outcome_summary,
         notes=args.notes,
-        stats=stats,
-    )
-    print(
-        f"Recorded {args.lane} lane: "
-        f"delta {_format_money(after - before)}, "
-        f"{stats['files_changed']} files changed."
+        overwrite=args.overwrite,
     )
 
 
@@ -330,7 +414,7 @@ def _cmd_experiment_summarize(args: argparse.Namespace) -> None:
     print("")
 
     if missing:
-        print(f"Missing lane results: {', '.join(missing)}")
+        print(f"Missing lane results: {', '.join(_lane_display_name(lane) for lane in missing)}")
         for lane in missing:
             print(f"repoctx experiment lane record --session-id {args.session_id} --lane {lane}")
         return
@@ -342,14 +426,261 @@ def _cmd_experiment_summarize(args: argparse.Namespace) -> None:
     savings = control_delta - repoctx_delta
     print(_format_lane_summary("control", control))
     print("")
-    print(_format_lane_summary("repoctx", repoctx))
+    print(_format_lane_summary("treatment", repoctx))
     print("")
     print("difference")
-    print(f"repoctx saved: {_format_money(savings)}")
+    print(f"treatment saved: {_format_money(savings)}")
     if control_delta > 0:
-        print(f"repoctx saved: {(savings / control_delta) * Decimal('100'):.1f}%")
-    winner = "repoctx" if savings > 0 else "control"
+        print(f"treatment saved: {(savings / control_delta) * Decimal('100'):.1f}%")
+    winner = "treatment" if savings > 0 else "control"
     print(f"winner: {winner}")
+
+
+def _record_lane_result(
+    *,
+    session_id: str,
+    experiment: dict[str, object],
+    lane: str,
+    before_raw: str | None,
+    after_raw: str | None,
+    completion_status: str | None,
+    verification_status: str | None,
+    outcome_summary: str | None,
+    notes: str | None,
+    overwrite: bool = False,
+) -> None:
+    if lane in experiment["lanes"] and not overwrite:
+        print(
+            f"Lane '{lane}' already recorded for session {session_id}. "
+            "Pass --overwrite to record it again.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    display_name = _lane_display_name(lane)
+    before = _parse_cost_or_prompt(
+        raw_value=before_raw,
+        prompt_text=f"Enter the total cost before starting the {display_name} lane (USD): ",
+    )
+    after = _parse_cost_or_prompt(
+        raw_value=after_raw,
+        prompt_text=f"Enter the total cost after finishing the {display_name} lane (USD): ",
+    )
+    if before < 0 or after < 0:
+        print("Costs must be non-negative.", file=sys.stderr)
+        raise SystemExit(1)
+    if after < before:
+        print("The after cost must be greater than or equal to the before cost.", file=sys.stderr)
+        raise SystemExit(1)
+
+    session_data = experiment["session"]
+    worktree_path = Path(session_data[f"{lane}_worktree"])
+    stats = collect_git_diff_stats(worktree_path, session_data["base_commit"])
+    record_experiment_lane(
+        session_id=session_id,
+        task_id=session_data["task_id"],
+        lane=lane,
+        worktree_path=worktree_path,
+        cost_before_usd=before,
+        cost_after_usd=after,
+        completion_status=completion_status,
+        verification_status=verification_status,
+        outcome_summary=outcome_summary,
+        notes=notes,
+        stats=stats,
+    )
+    clear_mcp_suppression()
+    print(
+        f"Recorded {display_name} lane: "
+        f"delta {_format_money(after - before)}, "
+        f"{stats['files_changed']} files changed."
+    )
+
+
+def _prompt_and_record_lane(*, session_id: str, experiment: dict[str, object], lane: str) -> None:
+    before_raw = input(f"Enter the total cost before starting the {_lane_display_name(lane)} lane (USD): ")
+    after_raw = input(f"Enter the total cost after finishing the {_lane_display_name(lane)} lane (USD): ")
+    completion_status = _prompt_optional(f"Completion status for the {_lane_display_name(lane)} lane: ")
+    verification_status = _prompt_optional(f"Verification status for the {_lane_display_name(lane)} lane: ")
+    outcome_summary = _prompt_optional("Outcome summary (optional): ")
+    notes = _prompt_optional("Notes (optional): ")
+    _record_lane_result(
+        session_id=session_id,
+        experiment=experiment,
+        lane=lane,
+        before_raw=before_raw,
+        after_raw=after_raw,
+        completion_status=completion_status,
+        verification_status=verification_status,
+        outcome_summary=outcome_summary,
+        notes=notes,
+    )
+
+
+def _print_experiment_created(*, session_id: str, session: dict[str, object]) -> None:
+    print("Experiment created")
+    print(f"Task: {session['prompt']}")
+    print(f"Session: {session_id}")
+    print(f"Base commit: {session['base_commit']}")
+    if session.get("label"):
+        print(f"Label: {session['label']}")
+    if session.get("guardrail_mode"):
+        print(f"Guardrails: {session['guardrail_mode']}")
+    print("")
+    _print_lane_handoff(session, lane="control")
+
+
+def _print_lane_handoff(session: dict[str, object], *, lane: str) -> None:
+    step_title = "Step 1 of 3: Run control lane" if lane == "control" else "Step 2 of 3: Run treatment lane"
+    worktree_key = "control_worktree" if lane == "control" else "repoctx_worktree"
+    worktree_path = Path(str(session[worktree_key]))
+    print(step_title)
+    print(f"Worktree: {worktree_path}")
+    print("")
+    print("Use this exact prompt in the agent:")
+    print(session["prompt"])
+    print("")
+    if lane == "control":
+        armed = arm_control_lane_mcp_suppression()
+        notice = control_lane_suppression_notice(armed=armed)
+        if notice:
+            print(notice)
+            print("")
+        warning = _control_lane_mcp_warning(worktree_path, mcp_suppress_armed=armed)
+        if warning:
+            print(warning)
+            print("")
+        print("Treatment lane will enable RepoCtx MCP in that worktree.")
+    else:
+        clear_mcp_suppression()
+        config_path = _write_treatment_cursor_config(worktree_path)
+        print(f"RepoCtx MCP enabled in: {config_path}")
+        print("Restart Cursor after opening this worktree if it does not pick up the new MCP config.")
+    print("Run the agent now, then rerun `repoctx experiment`.")
+
+
+def _print_lane_recording_reminder(session: dict[str, object], *, lane: str) -> None:
+    worktree_key = "control_worktree" if lane == "control" else "repoctx_worktree"
+    worktree_path = Path(str(session[worktree_key]))
+    print(f"Resume {_lane_display_name(lane)} lane")
+    print(f"Worktree: {worktree_path}")
+    print("Use this exact prompt in the agent:")
+    print(session["prompt"])
+    if lane == "control":
+        armed = arm_control_lane_mcp_suppression()
+        notice = control_lane_suppression_notice(armed=armed)
+        if notice:
+            print(notice)
+        warning = _control_lane_mcp_warning(worktree_path, mcp_suppress_armed=armed)
+        if warning:
+            print(warning)
+    else:
+        clear_mcp_suppression()
+        config_path = _write_treatment_cursor_config(worktree_path)
+        print(f"RepoCtx MCP enabled in: {config_path}")
+    print(f"If you already finished the {_lane_display_name(lane)} lane, record it below.")
+
+
+def _prompt_guardrail_mode() -> str:
+    enabled = _prompt_yes_no("Add strict comparison guardrails to the prompt? [Y/n]: ", default=True)
+    return "strict" if enabled else "none"
+
+
+def _prompt_multiline_task() -> str:
+    print("Enter the shared experiment prompt:")
+    lines: list[str] = []
+    while True:
+        line = input("> ")
+        if not line.strip():
+            if lines:
+                break
+            print("Prompt cannot be empty. Enter at least one line.")
+            continue
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _prompt_yes_no(prompt_text: str, *, default: bool) -> bool:
+    while True:
+        raw_value = input(prompt_text).strip().lower()
+        if not raw_value:
+            return default
+        if raw_value in {"y", "yes"}:
+            return True
+        if raw_value in {"n", "no"}:
+            return False
+        print("Please answer yes or no.")
+
+
+def _prompt_optional(prompt_text: str) -> str | None:
+    value = input(prompt_text).strip()
+    return value or None
+
+
+def _lane_display_name(lane: str) -> str:
+    return "treatment" if lane == "repoctx" else lane
+
+
+def _experiment_repo_root(session_payload: dict[str, object]) -> Path:
+    return Path(str(session_payload["control_worktree"])).resolve().parents[1]
+
+
+def _normalize_experiment_repo_root(repo: Path) -> Path:
+    resolved = repo.resolve()
+    for candidate in (resolved, *resolved.parents):
+        if candidate.name == ".worktrees":
+            return candidate.parent
+    return resolved
+
+
+def _control_lane_mcp_warning(worktree_path: Path, *, mcp_suppress_armed: bool) -> str | None:
+    global_config = Path.home() / ".cursor" / "mcp.json"
+    project_config = worktree_path / ".cursor" / "mcp.json"
+    if mcp_suppress_armed and _cursor_config_has_repoctx(global_config):
+        return None
+    if _cursor_config_has_repoctx(global_config):
+        return (
+            "Warning: ~/.cursor/mcp.json already enables RepoCtx, so the control lane may still "
+            "see RepoCtx tools unless you use a clean Cursor profile."
+        )
+    if _cursor_config_has_repoctx(project_config):
+        return (
+            "Warning: this worktree already has .cursor/mcp.json with RepoCtx enabled, so the control "
+            "lane is not isolated until you remove or disable that project-level config."
+        )
+    return None
+
+
+def _write_treatment_cursor_config(worktree_path: Path) -> Path:
+    config_path = worktree_path / ".cursor" / "mcp.json"
+    payload: dict[str, object] = {}
+    if config_path.exists():
+        try:
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            payload = {}
+    servers = payload.setdefault("mcpServers", {})
+    if not isinstance(servers, dict):
+        payload["mcpServers"] = {}
+        servers = payload["mcpServers"]
+    servers["repoctx"] = {
+        "command": "python3",
+        "args": ["-m", "repoctx.mcp_server"],
+    }
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return config_path
+
+
+def _cursor_config_has_repoctx(path: Path) -> bool:
+    if not path.exists():
+        return False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return False
+    servers = payload.get("mcpServers")
+    return isinstance(servers, dict) and "repoctx" in servers
 
 
 def _load_embedding_scores(

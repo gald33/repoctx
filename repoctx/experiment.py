@@ -4,6 +4,14 @@ import subprocess
 from pathlib import Path
 
 from repoctx.config import DEFAULT_CONFIG
+from repoctx.telemetry import record_experiment_session
+
+STRICT_GUARDRAILS_TEXT = """Strict comparison guardrails:
+- Do not broaden scope.
+- Do not make adjacent improvements.
+- Do not refactor unrelated code.
+- Modify only files required by the requested change.
+- Stop as soon as the definition of done is satisfied."""
 
 
 def create_experiment_worktrees(repo_root: str | Path, *, session_id: str) -> dict[str, Path | str]:
@@ -25,6 +33,51 @@ def create_experiment_worktrees(repo_root: str | Path, *, session_id: str) -> di
         "base_commit": base_commit,
         "control_worktree": control_path,
         "repoctx_worktree": repoctx_path,
+    }
+
+
+def normalize_experiment_prompt(prompt: str) -> str:
+    lines = [line.rstrip() for line in prompt.strip().splitlines()]
+    return "\n".join(lines).strip()
+
+
+def build_experiment_prompt(task_prompt: str, *, guardrail_mode: str = "none") -> str:
+    normalized = normalize_experiment_prompt(task_prompt)
+    if guardrail_mode != "strict":
+        return normalized
+    return f"{normalized}\n\n{STRICT_GUARDRAILS_TEXT}"
+
+
+def create_experiment_session(
+    repo_root: str | Path,
+    *,
+    session_id: str,
+    task_id: str,
+    task_prompt: str,
+    query: str | None = None,
+    label: str | None = None,
+    guardrail_mode: str = "none",
+) -> dict[str, Path | str]:
+    repo = Path(repo_root).resolve()
+    prompt = build_experiment_prompt(task_prompt, guardrail_mode=guardrail_mode)
+    session = create_experiment_worktrees(repo, session_id=session_id)
+    record_experiment_session(
+        session_id=session_id,
+        task_id=task_id,
+        query=query or task_prompt,
+        repo_root=repo,
+        prompt=prompt,
+        base_commit=session["base_commit"],
+        control_worktree=session["control_worktree"],
+        repoctx_worktree=session["repoctx_worktree"],
+        label=label,
+        guardrail_mode=guardrail_mode,
+    )
+    return {
+        **session,
+        "prompt": prompt,
+        "label": label,
+        "guardrail_mode": guardrail_mode,
     }
 
 

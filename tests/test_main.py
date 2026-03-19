@@ -8,7 +8,12 @@ import pytest
 
 from repoctx.experiment import create_experiment_worktrees
 from repoctx import main as repoctx_main
-from repoctx.telemetry import record_experiment_lane, record_experiment_session
+from repoctx.telemetry import (
+    load_active_experiment,
+    load_experiment_session,
+    record_experiment_lane,
+    record_experiment_session,
+)
 
 
 def run_git(repo: Path, *args: str) -> str:
@@ -104,8 +109,8 @@ def test_experiment_start_creates_session_and_prints_next_steps(tmp_path: Path, 
     stdout = capsys.readouterr().out
     assert "Session: session-1" in stdout
     assert "demo task" in stdout
-    assert "repoctx experiment lane record --session-id session-1 --lane control" in stdout
-    assert "repoctx experiment summarize --session-id session-1" in stdout
+    assert "Step 1 of 3: Run control lane" in stdout
+    assert "Run the agent now, then rerun `repoctx experiment`." in stdout
     assert (tmp_path / ".worktrees" / "experiment-session-1-control").exists()
     assert (tmp_path / ".worktrees" / "experiment-session-1-repoctx").exists()
 
@@ -113,6 +118,167 @@ def test_experiment_start_creates_session_and_prints_next_steps(tmp_path: Path, 
     payload = json.loads(lines[0])
     assert payload["event_type"] == "experiment_session"
     assert payload["prompt"] == "demo task"
+
+
+def test_experiment_wizard_hands_off_control_and_sets_active_session(tmp_path: Path, monkeypatch, capsys) -> None:
+    telemetry_dir = tmp_path / ".telemetry"
+    init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    uuids = iter(["session-5", "task-5"])
+    answers = iter(
+        [
+            "strict docs run",
+            "y",
+            "Update README only.",
+            "Add one bullet under Important naming note.",
+            "",
+            "y",
+        ]
+    )
+
+    monkeypatch.setenv("REPOCTX_TELEMETRY_DIR", str(telemetry_dir))
+    monkeypatch.setattr(repoctx_main, "uuid4", lambda: type("FakeUuid", (), {"hex": next(uuids)})())
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    monkeypatch.setattr(sys, "argv", ["repoctx", "experiment"])
+
+    repoctx_main.main()
+
+    stdout = capsys.readouterr().out
+    assert "Experiment setup wizard" in stdout
+    assert "Step 1 of 3: Run control lane" in stdout
+    assert "Run the agent now, then rerun `repoctx experiment`." in stdout
+    assert "Treatment lane will enable RepoCtx MCP in that worktree." in stdout
+    assert load_active_experiment(telemetry_dir=telemetry_dir, repo_root=tmp_path) == {
+        "session_id": "session-5",
+        "repo_root": str(tmp_path.resolve()),
+    }
+
+
+def test_experiment_resume_records_control_then_treatment_then_summary(tmp_path: Path, monkeypatch, capsys) -> None:
+    telemetry_dir = tmp_path / ".telemetry"
+    init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    uuids = iter(["session-6", "task-6"])
+    start_answers = iter(["", "n", "Update README only.", "", "y"])
+
+    monkeypatch.setenv("REPOCTX_TELEMETRY_DIR", str(telemetry_dir))
+    monkeypatch.setattr(repoctx_main, "uuid4", lambda: type("FakeUuid", (), {"hex": next(uuids)})())
+    monkeypatch.setattr("builtins.input", lambda _: next(start_answers))
+    monkeypatch.setattr(sys, "argv", ["repoctx", "experiment"])
+    repoctx_main.main()
+    _ = capsys.readouterr()
+
+    session = load_experiment_session(telemetry_dir=telemetry_dir, session_id="session-6")
+    control_worktree = Path(session["session"]["control_worktree"])
+    treatment_worktree = Path(session["session"]["repoctx_worktree"])
+    write_file(control_worktree / "README.md", "# Demo\n\ncontrol\n")
+
+    control_answers = iter(["1.00", "1.40", "completed", "passed", "", ""])
+    monkeypatch.chdir(control_worktree)
+    monkeypatch.setattr("builtins.input", lambda _: next(control_answers))
+    monkeypatch.setattr(sys, "argv", ["repoctx", "experiment"])
+    repoctx_main.main()
+
+    control_stdout = capsys.readouterr().out
+    assert "Recorded control lane" in control_stdout
+    assert "Step 2 of 3: Run treatment lane" in control_stdout
+    assert (treatment_worktree / ".cursor" / "mcp.json").exists()
+
+    write_file(treatment_worktree / "README.md", "# Demo\n\ntreatment\n")
+
+    treatment_answers = iter(["1.40", "1.65", "completed", "passed", "", ""])
+    monkeypatch.chdir(treatment_worktree)
+    monkeypatch.setattr("builtins.input", lambda _: next(treatment_answers))
+    monkeypatch.setattr(sys, "argv", ["repoctx", "experiment"])
+    repoctx_main.main()
+
+    final_stdout = capsys.readouterr().out
+    assert "If you already finished the treatment lane, record it below." in final_stdout
+    assert "Recorded treatment lane" in final_stdout
+    assert "Experiment summary" in final_stdout
+    assert "winner:" in final_stdout
+    assert load_active_experiment(telemetry_dir=telemetry_dir, repo_root=tmp_path) is None
+
+
+def test_experiment_resume_ignores_active_session_from_other_repo(tmp_path: Path, monkeypatch, capsys) -> None:
+    telemetry_dir = tmp_path / ".telemetry"
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    repo_a.mkdir()
+    repo_b.mkdir()
+    init_git_repo(repo_a)
+    init_git_repo(repo_b)
+
+    uuids = iter(["session-a", "task-a"])
+    monkeypatch.setenv("REPOCTX_TELEMETRY_DIR", str(telemetry_dir))
+    monkeypatch.setattr(repoctx_main, "uuid4", lambda: type("FakeUuid", (), {"hex": next(uuids)})())
+    monkeypatch.chdir(repo_a)
+    start_answers = iter(["", "n", "Task A", "", "y"])
+    monkeypatch.setattr("builtins.input", lambda _: next(start_answers))
+    monkeypatch.setattr(sys, "argv", ["repoctx", "experiment"])
+    repoctx_main.main()
+    _ = capsys.readouterr()
+
+    monkeypatch.chdir(repo_b)
+    other_repo_answers = iter(["", "n", "Task B", "", "n"])
+    monkeypatch.setattr("builtins.input", lambda _: next(other_repo_answers))
+    monkeypatch.setattr(sys, "argv", ["repoctx", "experiment"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        repoctx_main.main()
+
+    assert exc_info.value.code == 1
+    stdout = capsys.readouterr().out
+    assert "Experiment setup wizard" in stdout
+    assert "Repo:" in stdout
+
+
+def test_experiment_resume_after_manual_control_record_writes_treatment_config(tmp_path: Path, monkeypatch, capsys) -> None:
+    telemetry_dir = tmp_path / ".telemetry"
+    init_git_repo(tmp_path)
+    uuids = iter(["session-8", "task-8"])
+
+    monkeypatch.setenv("REPOCTX_TELEMETRY_DIR", str(telemetry_dir))
+    monkeypatch.setattr(repoctx_main, "uuid4", lambda: type("FakeUuid", (), {"hex": next(uuids)})())
+    monkeypatch.setattr(sys, "argv", ["repoctx", "experiment", "demo task", "--repo", str(tmp_path)])
+    repoctx_main.main()
+    _ = capsys.readouterr()
+
+    session = load_experiment_session(telemetry_dir=telemetry_dir, session_id="session-8")
+    control_worktree = Path(session["session"]["control_worktree"])
+    treatment_worktree = Path(session["session"]["repoctx_worktree"])
+    write_file(control_worktree / "README.md", "# Demo\n\ncontrol\n")
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "repoctx",
+            "experiment",
+            "lane",
+            "record",
+            "--session-id",
+            "session-8",
+            "--lane",
+            "control",
+            "--before",
+            "1.00",
+            "--after",
+            "1.20",
+        ],
+    )
+    repoctx_main.main()
+    _ = capsys.readouterr()
+
+    treatment_answers = iter(["1.20", "1.35", "completed", "passed", "", ""])
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("builtins.input", lambda _: next(treatment_answers))
+    monkeypatch.setattr(sys, "argv", ["repoctx", "experiment"])
+    repoctx_main.main()
+
+    stdout = capsys.readouterr().out
+    assert (treatment_worktree / ".cursor" / "mcp.json").exists()
+    assert "RepoCtx MCP enabled in:" in stdout
 
 
 def test_experiment_lane_record_writes_costs_and_git_stats(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -189,7 +355,7 @@ def test_experiment_lane_record_prompts_for_missing_costs(tmp_path: Path, monkey
     repoctx_main.main()
 
     stdout = capsys.readouterr().out
-    assert "Recorded repoctx lane" in stdout
+    assert "Recorded treatment lane" in stdout
     lines = (telemetry_dir / "experiment-runs.jsonl").read_text(encoding="utf-8").strip().splitlines()
     payload = json.loads(lines[-1])
     assert payload["cost_before_usd"] == "1.50"
@@ -232,7 +398,7 @@ def test_experiment_summarize_prints_controlled_comparison(tmp_path: Path, monke
 
     stdout = capsys.readouterr().out
     assert "Experiment summary" in stdout
-    assert "repoctx saved: $0.50" in stdout
+    assert "treatment saved: $0.50" in stdout
     assert "prompt hash" in stdout.lower()
 
 
@@ -257,7 +423,7 @@ def test_experiment_summarize_shows_missing_lane(tmp_path: Path, monkeypatch, ca
     repoctx_main.main()
 
     stdout = capsys.readouterr().out
-    assert "Missing lane results: repoctx" in stdout
+    assert "Missing lane results: treatment" in stdout
     assert "--lane repoctx" in stdout
 
 
@@ -277,3 +443,22 @@ def test_cli_records_failure_telemetry_and_exits(tmp_path: Path, monkeypatch) ->
     telemetry_payload = json.loads(event_path.read_text(encoding="utf-8").strip())
     assert "query" not in telemetry_payload
     assert "repo_root" not in telemetry_payload
+
+
+def test_cli_help_includes_examples_and_subcommand_guidance(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(sys, "argv", ["repoctx", "--help"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        repoctx_main.main()
+
+    assert exc_info.value.code == 0
+    stdout = capsys.readouterr().out
+    assert "usage: repoctx [-h] TASK" in stdout
+    assert "Examples:" in stdout
+    assert 'repoctx "refactor the auth middleware to support OAuth"' in stdout
+    assert "repoctx query \"show me tests related to the billing webhook flow\" --repo /path/to/repo --format json" in stdout
+    assert "Use `repoctx query TASK [flags]` when you need query-specific options." in stdout
+    assert "repoctx experiment \"refactor the auth middleware to support OAuth\"" in stdout
+    assert "Common subcommands:" in stdout
+    assert "query" in stdout
+    assert "experiment" in stdout
