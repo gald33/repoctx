@@ -1,7 +1,10 @@
 import json
 from pathlib import Path
 
+import pytest
+
 import repoctx.mcp_server as mcp_server
+from repoctx.experiment_mcp import arm_control_lane_mcp_suppression
 from repoctx.mcp_server import create_server
 
 
@@ -50,6 +53,40 @@ def test_mcp_server_writes_repoctx_telemetry(tmp_path: Path) -> None:
     assert payload["surface"] == "mcp"
     assert "query" not in payload
     assert "repo_root" not in payload
+
+
+def test_mcp_server_returns_stub_when_experiment_mcp_suppressed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_file(tmp_path / "AGENTS.md", "# Repo guidance\n")
+    telemetry_dir = tmp_path / ".telemetry"
+    cfg = tmp_path / "repoctx-config.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "experiment_mcp_suppress": True,
+                "experiment_mcp_idle_ttl_seconds": 3600,
+                "experiment_mcp_extend_seconds": 600,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("REPOCTX_CONFIG_PATH", str(cfg))
+    monkeypatch.setattr("repoctx.experiment_mcp.time.time", lambda: 10_000.0)
+    assert arm_control_lane_mcp_suppression(telemetry_dir=telemetry_dir) is True
+    monkeypatch.setattr("repoctx.experiment_mcp.time.time", lambda: 10_100.0)
+
+    server = create_server(repo_root=tmp_path, telemetry_dir=telemetry_dir)
+    tool = server._tool_manager.list_tools()[0]
+    result = tool.fn(task="retry")
+
+    assert result.get("experiment_mcp_suppressed") is True
+    assert result["relevant_docs"] == []
+    assert "control-lane experiment" in result["context_markdown"]
+    event_path = telemetry_dir / "repoctx-events.jsonl"
+    payload = json.loads(event_path.read_text(encoding="utf-8").strip())
+    assert payload["success"] is False
+    assert payload["error_type"] == "ExperimentMcpSuppressed"
 
 
 def test_mcp_server_ignores_telemetry_write_failures(tmp_path: Path, monkeypatch) -> None:

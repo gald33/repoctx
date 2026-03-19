@@ -12,6 +12,9 @@ repoctx \- local repository intelligence for coding agents
 query \fItask\fR [\fB\-\-repo\fR \fIPATH\fR] [\fB\-\-format\fR \fBmarkdown\fR|\fBjson\fR]
 .br
 .B repoctx
+experiment [\fB\-\-repo\fR \fIPATH\fR]
+.br
+.B repoctx
 \fIcommand\fR [\fIargs\fR]
 .SH DESCRIPTION
 .B repoctx
@@ -36,7 +39,13 @@ Re-embed a single file in the index.
 Delete and rebuild the embedding index.
 .TP
 .B experiment
-Create and record paired control versus repoctx experiment runs.
+Launch or resume a guided control versus treatment experiment with paired worktrees.
+During the control lane, RepoCtx may stub MCP
+.B get_task_context
+responses until the treatment lane; timing is configured in
+.I ~/.repoctx/config.json
+(for example
+.IR experiment_mcp_suppress ", " experiment_mcp_idle_ttl_seconds ", and " experiment_mcp_extend_seconds "; see the README).
 .SH OPTIONS
 .TP
 .B \-h\fR, \fB\-\-help
@@ -70,12 +79,21 @@ Build embeddings for a repository:
 repoctx index --repo /path/to/repo
 .EE
 .TP
-Start a controlled experiment session:
+Launch the guided experiment wizard:
+.IP
+.EX
+repoctx experiment
+.EE
+.TP
+Start a controlled experiment session with a prewritten prompt:
 .IP
 .EX
 repoctx experiment "refactor the auth middleware to support OAuth"
 .EE
 .SH FILES
+.TP
+.I ~/.repoctx/config.json
+Optional RepoCtx user settings (for example experiment MCP suppression timing).
 .TP
 .I .repoctx/embeddings/
 Default repository-local embedding index directory.

@@ -5,6 +5,8 @@ from pathlib import Path
 from time import perf_counter
 from uuid import uuid4
 
+from repoctx.experiment_mcp import mcp_suppression_should_short_circuit
+from repoctx.models import ContextMetrics, ContextResponse
 from repoctx.retriever import get_task_context as repo_get_task_context
 from repoctx.telemetry import record_repoctx_invocation
 
@@ -31,6 +33,36 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
         started = perf_counter()
         session_id = uuid4().hex
         task_id = uuid4().hex
+
+        if mcp_suppression_should_short_circuit(telemetry_dir=telemetry_dir):
+            stub = ContextResponse(
+                summary="RepoCtx MCP suppressed for experiment control lane.",
+                relevant_docs=[],
+                relevant_files=[],
+                related_tests=[],
+                graph_neighbors=[],
+                context_markdown=(
+                    "RepoCtx MCP is temporarily suppressed for a control-lane experiment.\n\n"
+                    "Tools return an empty stub until the idle TTL passes, a lane is recorded, "
+                    "or the treatment lane starts. Run any `repoctx` CLI command to extend the window. "
+                    "See ~/.repoctx/config.json (experiment_mcp_* keys)."
+                ),
+                metrics=ContextMetrics(),
+            )
+            payload = stub.to_dict(include_metrics=True)
+            payload["experiment_mcp_suppressed"] = True
+            _record_mcp_telemetry(
+                telemetry_dir=telemetry_dir,
+                task=task,
+                repo_root=resolved_root,
+                session_id=session_id,
+                task_id=task_id,
+                response=None,
+                success=False,
+                error_type="ExperimentMcpSuppressed",
+                duration_ms=int((perf_counter() - started) * 1000),
+            )
+            return payload
 
         embedding_scores: dict[str, float] | None = None
         if embedding_retriever is not None:
