@@ -104,6 +104,100 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
         )
         return response.to_dict()
 
+    # ---- repoctx v2 protocol ops ------------------------------------------------
+    # See docs/plans/2026-04-23-repoctx-v2-design.md § 4.
+    from repoctx.protocol import (
+        op_authority,
+        op_bundle,
+        op_refresh,
+        op_risk_report,
+        op_scope,
+        op_validate_plan,
+    )
+    from repoctx.telemetry import record_protocol_op
+
+    def _run_op(op_name: str, task: str, fn):
+        started = perf_counter()
+        sess = uuid4().hex
+        tid = uuid4().hex
+        try:
+            result = fn()
+        except Exception as exc:
+            try:
+                record_protocol_op(
+                    telemetry_dir=telemetry_dir,
+                    op=op_name,
+                    surface="mcp",
+                    session_id=sess,
+                    task_id=tid,
+                    task=task,
+                    repo_root=resolved_root,
+                    success=False,
+                    duration_ms=int((perf_counter() - started) * 1000),
+                    output_bytes=0,
+                    error_type=type(exc).__name__,
+                )
+            except Exception:
+                logger.debug("Failed to record protocol_op telemetry", exc_info=True)
+            raise
+        try:
+            record_protocol_op(
+                telemetry_dir=telemetry_dir,
+                op=op_name,
+                surface="mcp",
+                session_id=sess,
+                task_id=tid,
+                task=task,
+                repo_root=resolved_root,
+                success=True,
+                duration_ms=int((perf_counter() - started) * 1000),
+                output_bytes=len(json.dumps(result).encode("utf-8")),
+            )
+        except Exception:
+            logger.debug("Failed to record protocol_op telemetry", exc_info=True)
+        return result
+
+    @server.tool()
+    def bundle(task: str) -> dict[str, object]:
+        return _run_op("bundle", task, lambda: op_bundle(task, repo_root=resolved_root))
+
+    @server.tool()
+    def authority(task: str, include: str = "summary") -> dict[str, object]:
+        inc = "full" if include == "full" else "summary"
+        return _run_op("authority", task, lambda: op_authority(task, repo_root=resolved_root, include=inc))
+
+    @server.tool()
+    def scope(task: str) -> dict[str, object]:
+        return _run_op("scope", task, lambda: op_scope(task, repo_root=resolved_root))
+
+    @server.tool()
+    def validate_plan(task: str, changed_files: list[str]) -> dict[str, object]:
+        return _run_op(
+            "validate_plan",
+            task,
+            lambda: op_validate_plan(task, changed_files, repo_root=resolved_root),
+        )
+
+    @server.tool()
+    def risk_report(task: str, changed_files: list[str]) -> dict[str, object]:
+        return _run_op(
+            "risk_report",
+            task,
+            lambda: op_risk_report(task, changed_files, repo_root=resolved_root),
+        )
+
+    @server.tool()
+    def refresh(
+        task: str,
+        changed_files: list[str],
+        current_scope: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        return _run_op(
+            "refresh",
+            task,
+            lambda: op_refresh(task, changed_files, current_scope, repo_root=resolved_root),
+        )
+
     return server
 
 

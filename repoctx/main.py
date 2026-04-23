@@ -31,7 +31,23 @@ from repoctx.telemetry import (
 
 logger = logging.getLogger(__name__)
 
-SUBCOMMANDS = {"query", "index", "update", "rebuild", "experiment"}
+SUBCOMMANDS = {
+    "query",
+    "index",
+    "update",
+    "rebuild",
+    "experiment",
+    "bundle",
+    "authority",
+    "scope",
+    "validate-plan",
+    "risk-report",
+    "refresh",
+    "install-claude-code",
+    "install-cursor",
+    "install-codex",
+    "init-authority",
+}
 EXPERIMENT_SUBCOMMANDS = {"start", "lane", "summarize"}
 HELP_USAGE = """repoctx [-h] TASK
        repoctx [-h] COMMAND ..."""
@@ -141,6 +157,65 @@ def build_parser() -> argparse.ArgumentParser:
     exp_summary = exp_sub.add_parser("summarize", help="Summarize an experiment session")
     exp_summary.add_argument("--session-id", required=True, help="Experiment session ID")
 
+    # -- repoctx v2 protocol ops ---------------------------------------------
+    b = sub.add_parser("bundle", help="Build the ground-truth bundle for a task (v2)")
+    b.add_argument("task", help="Task description")
+    b.add_argument("--repo", default=".", help="Repository root")
+    b.add_argument("--full", action="store_true", help="Include full authority text")
+    b.add_argument("--format", choices=("json", "markdown"), default="json")
+
+    a = sub.add_parser("authority", help="Return only authority records + constraints (v2)")
+    a.add_argument("task", help="Task description")
+    a.add_argument("--repo", default=".", help="Repository root")
+    a.add_argument("--include", choices=("summary", "full"), default="summary")
+
+    s = sub.add_parser("scope", help="Return edit scope for a task (v2)")
+    s.add_argument("task", help="Task description")
+    s.add_argument("--repo", default=".", help="Repository root")
+
+    v = sub.add_parser("validate-plan", help="Return validation plan given changed files (v2)")
+    v.add_argument("task", help="Task description")
+    v.add_argument("--repo", default=".", help="Repository root")
+    v.add_argument("--changed", nargs="*", default=[], help="Changed file paths")
+
+    r = sub.add_parser("risk-report", help="Return risk report given changed files (v2)")
+    r.add_argument("task", help="Task description")
+    r.add_argument("--repo", default=".", help="Repository root")
+    r.add_argument("--changed", nargs="*", default=[], help="Changed file paths")
+
+    rf = sub.add_parser("refresh", help="Return scope delta given current scope and changed files (v2)")
+    rf.add_argument("task", help="Task description")
+    rf.add_argument("--repo", default=".", help="Repository root")
+    rf.add_argument("--changed", nargs="*", default=[], help="Changed file paths")
+    rf.add_argument(
+        "--current-scope-json",
+        help="JSON for current edit scope (keys: allowed_paths, related_paths, protected_paths)",
+    )
+
+    ic = sub.add_parser(
+        "install-claude-code",
+        help="Install AGENTS.md section + .mcp.json entry for repoctx (v2)",
+    )
+    ic.add_argument("--repo", default=".", help="Repository root")
+
+    icu = sub.add_parser(
+        "install-cursor",
+        help="Install AGENTS.md section + .cursor/mcp.json entry for repoctx (v2)",
+    )
+    icu.add_argument("--repo", default=".", help="Repository root")
+
+    ico = sub.add_parser(
+        "install-codex",
+        help="Install AGENTS.md section + .codex/mcp.json entry for repoctx (v2)",
+    )
+    ico.add_argument("--repo", default=".", help="Repository root")
+
+    ia = sub.add_parser(
+        "init-authority",
+        help="Scaffold contracts/ + docs/architecture/ + examples/ starter layout (v2)",
+    )
+    ia.add_argument("--repo", default=".", help="Repository root")
+
     return parser
 
 
@@ -162,9 +237,107 @@ def main() -> None:
         _cmd_rebuild(args)
     elif cmd == "experiment":
         _cmd_experiment(args)
+    elif cmd == "bundle":
+        _cmd_bundle(args)
+    elif cmd == "authority":
+        _cmd_authority(args)
+    elif cmd == "scope":
+        _cmd_scope(args)
+    elif cmd == "validate-plan":
+        _cmd_validate_plan(args)
+    elif cmd == "risk-report":
+        _cmd_risk_report(args)
+    elif cmd == "refresh":
+        _cmd_refresh(args)
+    elif cmd == "install-claude-code":
+        _cmd_install_claude_code(args)
+    elif cmd == "install-cursor":
+        _cmd_install_cursor(args)
+    elif cmd == "install-codex":
+        _cmd_install_codex(args)
+    elif cmd == "init-authority":
+        _cmd_init_authority(args)
     else:
         parser.print_help()
         raise SystemExit(1)
+
+
+def _cmd_bundle(args: argparse.Namespace) -> None:
+    if getattr(args, "format", "json") == "markdown":
+        from repoctx.bundle import build_bundle, render_bundle_markdown
+
+        bundle = build_bundle(args.task, repo_root=args.repo)
+        print(render_bundle_markdown(bundle))
+        return
+    from repoctx.protocol import op_bundle
+
+    print(json.dumps(op_bundle(args.task, repo_root=args.repo, include_full_text=args.full), indent=2))
+
+
+def _cmd_authority(args: argparse.Namespace) -> None:
+    from repoctx.protocol import op_authority
+
+    print(json.dumps(op_authority(args.task, repo_root=args.repo, include=args.include), indent=2))
+
+
+def _cmd_scope(args: argparse.Namespace) -> None:
+    from repoctx.protocol import op_scope
+
+    print(json.dumps(op_scope(args.task, repo_root=args.repo), indent=2))
+
+
+def _cmd_validate_plan(args: argparse.Namespace) -> None:
+    from repoctx.protocol import op_validate_plan
+
+    print(json.dumps(op_validate_plan(args.task, args.changed, repo_root=args.repo), indent=2))
+
+
+def _cmd_risk_report(args: argparse.Namespace) -> None:
+    from repoctx.protocol import op_risk_report
+
+    print(json.dumps(op_risk_report(args.task, args.changed, repo_root=args.repo), indent=2))
+
+
+def _cmd_refresh(args: argparse.Namespace) -> None:
+    from repoctx.protocol import op_refresh
+
+    current_scope = None
+    if args.current_scope_json:
+        current_scope = json.loads(args.current_scope_json)
+    print(
+        json.dumps(
+            op_refresh(args.task, args.changed, current_scope, repo_root=args.repo),
+            indent=2,
+        )
+    )
+
+
+def _cmd_install_claude_code(args: argparse.Namespace) -> None:
+    from repoctx.harness import install_claude_code
+
+    result = install_claude_code(repo_root=args.repo)
+    print(json.dumps(result.to_dict(), indent=2))
+
+
+def _cmd_install_cursor(args: argparse.Namespace) -> None:
+    from repoctx.harness import install_cursor
+
+    result = install_cursor(repo_root=args.repo)
+    print(json.dumps(result.to_dict(), indent=2))
+
+
+def _cmd_install_codex(args: argparse.Namespace) -> None:
+    from repoctx.harness import install_codex
+
+    result = install_codex(repo_root=args.repo)
+    print(json.dumps(result.to_dict(), indent=2))
+
+
+def _cmd_init_authority(args: argparse.Namespace) -> None:
+    from repoctx.authority.scaffold import init_authority
+
+    result = init_authority(repo_root=args.repo)
+    print(json.dumps(result.to_dict(), indent=2))
 
 
 def _ensure_default_subcommand() -> None:
@@ -290,13 +463,13 @@ def _build_and_save_index(repo: Path) -> None:
 
     repo = repo.resolve()
     try:
-        vec_index = build_index(repo)
+        record_store = build_index(repo)
     except ImportError as exc:
         print(f"{exc}", file=sys.stderr)
         raise SystemExit(1)
     emb_dir = repo / DEFAULT_EMBEDDING_CONFIG.index_dir / "embeddings"
-    vec_index.save(emb_dir)
-    print(f"Indexed {len(vec_index)} files → {emb_dir}")
+    record_store.save(emb_dir)
+    print(f"Indexed {len(record_store)} files → {emb_dir}")
 
 
 def _cmd_experiment_start(args: argparse.Namespace) -> None:

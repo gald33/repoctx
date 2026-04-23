@@ -197,6 +197,61 @@ Identified 2 docs, 2 files, 1 test, and 1 graph neighbor relevant to
 
 Use `--format json` if you want structured output instead of Markdown.
 
+## Ground-Truth Bundle (v2)
+
+RepoCtx v2 adds an **authority-first** layer on top of the context pack. Instead of just "relevant files", an agent can ask for a Ground-Truth Bundle that includes:
+
+- **Authority records** (Level 1: contracts/invariants; Level 2: AGENTS.md, architecture notes; Level 3: implementation)
+- **Constraints** extracted from those records (front-matter + `## Invariants` / `## Do not` bullets + inline `INVARIANT:` / `DO NOT:` / `IMPORTANT:` markers)
+- **Edit scope**: `allowed_paths`, `related_paths`, `protected_paths`
+- **Validation plan**: tests and commands to run before finalizing
+- **Risk notes**: protected-path touches, constraint violations, possible drift
+- **Self-recall rules**: `when_to_recall_repoctx`, `before_finalize_checklist`, `uncertainty_rule` — always present, so the agent knows when to call RepoCtx again
+
+### Protocol ops (CLI + MCP)
+
+| Op | CLI | When to call |
+|----|-----|--------------|
+| `bundle(task)` | `repoctx bundle "task"` | Task start — primary call |
+| `authority(task)` | `repoctx authority "task"` | Only need authority + constraints |
+| `scope(task)` | `repoctx scope "task"` | Deciding what to edit |
+| `validate_plan(task, changed_files)` | `repoctx validate-plan "task" --changed a.py b.py` | Before finalizing |
+| `risk_report(task, changed_files)` | `repoctx risk-report "task" --changed a.py b.py` | Before finalizing |
+| `refresh(task, changed_files, current_scope)` | `repoctx refresh "task" --changed a.py ...` | Scope expanded mid-task |
+
+Target usage: **≤ 5 calls per task** in typical flows. Bundles are structured, authority-first, and token-budgeted.
+
+### Try it
+
+```bash
+repoctx init-authority                   # scaffold contracts/ + docs/architecture/
+repoctx bundle "refactor session-token storage"
+repoctx bundle "refactor session-token storage" --format markdown
+```
+
+### Install for your agent harness
+
+```bash
+repoctx install-claude-code     # writes AGENTS.md section + .mcp.json
+repoctx install-cursor          # writes AGENTS.md section + .cursor/mcp.json
+repoctx install-codex           # writes AGENTS.md section + .codex/mcp.json
+```
+
+All installers are idempotent; existing AGENTS.md content and other MCP servers are preserved.
+
+### Repo conventions
+
+RepoCtx v2 looks for (all optional, all lightweight):
+
+- `AGENTS.md` / `AGENT.md` / `CLAUDE.md` — agent-facing instructions (Level 2)
+- `contracts/**` — Level-1 contracts with YAML-ish front-matter (`applies_to`, `severity`, `validated_by`)
+- `docs/architecture/**`, `docs/adr/**` — Level-2 architecture notes
+- `examples/**` — validating examples
+- `tests/contracts/**` — tests that enforce contracts
+- Inline markers in any file: `# INVARIANT:`, `# CONTRACT:`, `# DO NOT:`, `# IMPORTANT:`, `# See contract: <path>`
+
+Design doc: [`docs/plans/2026-04-23-repoctx-v2-design.md`](docs/plans/2026-04-23-repoctx-v2-design.md).
+
 ## FAQ
 
 ### Do I need to run a server manually?

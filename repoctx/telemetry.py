@@ -201,6 +201,47 @@ def record_repoctx_invocation(
     return append_jsonl(telemetry_dir, REPOCTX_EVENTS_FILE, payload)
 
 
+def record_protocol_op(
+    *,
+    telemetry_dir: str | Path | None = None,
+    op: str,
+    surface: Surface = DEFAULT_SURFACE,
+    session_id: str,
+    task_id: str,
+    task: str,
+    repo_root: str | Path,
+    success: bool,
+    duration_ms: int,
+    output_bytes: int,
+    error_type: str | None = None,
+    extras: dict[str, Any] | None = None,
+) -> Path:
+    """Record a single repoctx-v2 protocol-op invocation.
+
+    Emits one line per call to ``bundle`` / ``authority`` / ``scope`` /
+    ``validate_plan`` / ``risk_report`` / ``refresh``. Used to measure the
+    "calls per task" success metric from the v2 design doc.
+    """
+    payload: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "event_type": "protocol_op",
+        "event_time": utc_now_seconds(),
+        "op": op,
+        "surface": surface,
+        "session_id": session_id,
+        "task_id": task_id,
+        "task_hash": sha256_hex(task),
+        "repo_hash": sha256_hex(str(Path(repo_root).resolve())),
+        "success": success,
+        "error_type": error_type,
+        "duration_ms": duration_ms,
+        "output_bytes": output_bytes,
+    }
+    if extras:
+        payload["extras"] = extras
+    return append_jsonl(telemetry_dir, REPOCTX_EVENTS_FILE, payload)
+
+
 def record_agent_run(
     *,
     telemetry_dir: str | Path | None = None,
