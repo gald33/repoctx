@@ -12,6 +12,7 @@ SCHEMA_VERSION = 1
 REPOCTX_EVENTS_FILE = "repoctx-events.jsonl"
 AGENT_RUNS_FILE = "agent-runs.jsonl"
 EXPERIMENT_RUNS_FILE = "experiment-runs.jsonl"
+ACTIVE_EXPERIMENT_FILE = "active-experiment.json"
 DEFAULT_VARIANT = "repoctx"
 DEFAULT_SURFACE = "cli"
 
@@ -55,6 +56,99 @@ def _read_jsonl(telemetry_dir: str | Path | None, filename: str) -> list[dict[st
         for line in output_path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+
+
+def save_active_experiment(
+    *,
+    telemetry_dir: str | Path | None = None,
+    session_id: str,
+    repo_root: str | Path,
+) -> Path:
+    target_dir = get_telemetry_dir(telemetry_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    output_path = target_dir / ACTIVE_EXPERIMENT_FILE
+    repo_key = str(Path(repo_root).resolve())
+    payload = _load_active_experiment_payload(output_path)
+    experiments = payload.setdefault("experiments", {})
+    experiments[repo_key] = session_id
+    output_path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    return output_path
+
+
+def load_active_experiment(
+    *,
+    telemetry_dir: str | Path | None = None,
+    repo_root: str | Path,
+) -> dict[str, str] | None:
+    output_path = get_telemetry_dir(telemetry_dir) / ACTIVE_EXPERIMENT_FILE
+    if not output_path.exists():
+        return None
+    payload = _load_active_experiment_payload(output_path)
+    if not payload:
+        if output_path.exists():
+            output_path.unlink()
+        return None
+    repo_key = str(Path(repo_root).resolve())
+    experiments = payload.get("experiments")
+    if not isinstance(experiments, dict):
+        output_path.unlink(missing_ok=True)
+        return None
+    session_id = experiments.get(repo_key)
+    if not isinstance(session_id, str) or not session_id:
+        if repo_key in experiments:
+            experiments.pop(repo_key, None)
+            if experiments:
+                output_path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+            else:
+                output_path.unlink(missing_ok=True)
+        return None
+    return {"session_id": session_id, "repo_root": repo_key}
+
+
+def clear_active_experiment(
+    *,
+    telemetry_dir: str | Path | None = None,
+    repo_root: str | Path | None = None,
+) -> None:
+    output_path = get_telemetry_dir(telemetry_dir) / ACTIVE_EXPERIMENT_FILE
+    if output_path.exists():
+        if repo_root is None:
+            output_path.unlink()
+            return
+        payload = _load_active_experiment_payload(output_path)
+        if not payload:
+            output_path.unlink()
+            return
+        experiments = payload.get("experiments")
+        if not isinstance(experiments, dict):
+            output_path.unlink()
+            return
+        experiments.pop(str(Path(repo_root).resolve()), None)
+        if not experiments:
+            output_path.unlink()
+            return
+        output_path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _load_active_experiment_payload(output_path: Path) -> dict[str, Any]:
+    if not output_path.exists():
+        return {"experiments": {}}
+    try:
+        payload = json.loads(output_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    if "experiments" in payload:
+        experiments = payload.get("experiments")
+        if isinstance(experiments, dict):
+            return payload
+        return {}
+    session_id = payload.get("session_id")
+    repo_root = payload.get("repo_root")
+    if isinstance(session_id, str) and session_id and isinstance(repo_root, str) and repo_root:
+        return {"experiments": {repo_root: session_id}}
+    return {"experiments": {}}
 
 
 def _decimal_string(value: Decimal | str | float | int) -> str:
@@ -104,6 +198,47 @@ def record_repoctx_invocation(
         "output_format": output_format,
         "output_bytes": output_bytes,
     }
+    return append_jsonl(telemetry_dir, REPOCTX_EVENTS_FILE, payload)
+
+
+def record_protocol_op(
+    *,
+    telemetry_dir: str | Path | None = None,
+    op: str,
+    surface: Surface = DEFAULT_SURFACE,
+    session_id: str,
+    task_id: str,
+    task: str,
+    repo_root: str | Path,
+    success: bool,
+    duration_ms: int,
+    output_bytes: int,
+    error_type: str | None = None,
+    extras: dict[str, Any] | None = None,
+) -> Path:
+    """Record a single repoctx-v2 protocol-op invocation.
+
+    Emits one line per call to ``bundle`` / ``authority`` / ``scope`` /
+    ``validate_plan`` / ``risk_report`` / ``refresh``. Used to measure the
+    "calls per task" success metric from the v2 design doc.
+    """
+    payload: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "event_type": "protocol_op",
+        "event_time": utc_now_seconds(),
+        "op": op,
+        "surface": surface,
+        "session_id": session_id,
+        "task_id": task_id,
+        "task_hash": sha256_hex(task),
+        "repo_hash": sha256_hex(str(Path(repo_root).resolve())),
+        "success": success,
+        "error_type": error_type,
+        "duration_ms": duration_ms,
+        "output_bytes": output_bytes,
+    }
+    if extras:
+        payload["extras"] = extras
     return append_jsonl(telemetry_dir, REPOCTX_EVENTS_FILE, payload)
 
 
@@ -164,6 +299,8 @@ def record_experiment_session(
     base_commit: str,
     control_worktree: str | Path,
     repoctx_worktree: str | Path,
+    label: str | None = None,
+    guardrail_mode: str | None = None,
 ) -> Path:
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -178,6 +315,8 @@ def record_experiment_session(
         "base_commit": base_commit,
         "control_worktree": str(Path(control_worktree)),
         "repoctx_worktree": str(Path(repoctx_worktree)),
+        "label": label,
+        "guardrail_mode": guardrail_mode,
     }
     return append_jsonl(telemetry_dir, EXPERIMENT_RUNS_FILE, payload)
 

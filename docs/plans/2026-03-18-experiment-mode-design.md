@@ -6,13 +6,23 @@
 
 ## Product Shape
 
-The experiment UX should stay CLI-first and intentionally guided:
+The experiment UX should stay CLI-first and intentionally guided.
+
+Default entry should be an interactive wizard:
+
+```bash
+repoctx experiment
+```
+
+The wizard should collect a multiline prompt, optionally attach strict comparison guardrails, show a confirmation summary, then create the experiment session and paired worktrees.
+
+The one-line fast path should remain available for users who already have the prompt ready:
 
 ```bash
 repoctx experiment "your task prompt"
 ```
 
-That single command should create the experiment session, generate two isolated worktrees, store the canonical prompt, and print the exact next commands for both lanes.
+Both flows should store the canonical prompt and print the exact next commands for both lanes.
 
 After each lane, the user records the total cost shown by their external agent UI before and after the run. RepoCtx calculates the delta instead of asking the user to do the math.
 

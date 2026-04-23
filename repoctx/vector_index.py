@@ -32,6 +32,9 @@ class IndexEntry:
     path: str
     kind: str
     content_hash: str
+    namespace: str = "default"
+    record_type: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -50,7 +53,10 @@ class VectorIndex:
         return len(self.entries)
 
     def similarity_scores(self, query_vector: Any) -> dict[str, float]:
-        """Cosine similarity of *query_vector* against every stored vector."""
+        """Cosine similarity of *query_vector* against every stored vector.
+
+        Returns ``{path: similarity}`` for backward compatibility.
+        """
         if not HAS_NUMPY or self.vectors is None or len(self.entries) == 0:
             return {}
         scores = self.vectors @ query_vector
@@ -58,6 +64,39 @@ class VectorIndex:
             entry.path: float(scores[i])
             for i, entry in enumerate(self.entries)
         }
+
+    def similarity_scores_by_id(
+        self,
+        query_vector: Any,
+        *,
+        namespace: str | None = None,
+        record_types: list[str] | None = None,
+        metadata_filters: list[tuple[str, list[Any]]] | None = None,
+    ) -> list[tuple[str, float, IndexEntry]]:
+        """Score every entry against *query_vector* with optional filtering.
+
+        Returns a list of ``(entry.path, score, entry)`` tuples sorted by
+        descending score.  Filtering narrows results *before* sorting.
+        """
+        if not HAS_NUMPY or self.vectors is None or len(self.entries) == 0:
+            return []
+        scores = self.vectors @ query_vector
+        results: list[tuple[str, float, IndexEntry]] = []
+        rt_set = set(record_types) if record_types else None
+        for i, entry in enumerate(self.entries):
+            if namespace is not None and entry.namespace != namespace:
+                continue
+            if rt_set is not None and entry.record_type not in rt_set:
+                continue
+            if metadata_filters:
+                if not all(
+                    entry.metadata.get(key) in vals
+                    for key, vals in metadata_filters
+                ):
+                    continue
+            results.append((entry.path, float(scores[i]), entry))
+        results.sort(key=lambda t: -t[1])
+        return results
 
     # ---- persistence --------------------------------------------------------
 
@@ -69,10 +108,20 @@ class VectorIndex:
 
         _np.save(d / VECTORS_FILE, self.vectors)
 
-        metadata = [
-            {"path": e.path, "kind": e.kind, "content_hash": e.content_hash}
-            for e in self.entries
-        ]
+        metadata = []
+        for e in self.entries:
+            entry_dict: dict[str, Any] = {
+                "path": e.path,
+                "kind": e.kind,
+                "content_hash": e.content_hash,
+            }
+            if e.namespace != "default":
+                entry_dict["namespace"] = e.namespace
+            if e.record_type:
+                entry_dict["record_type"] = e.record_type
+            if e.metadata:
+                entry_dict["metadata"] = e.metadata
+            metadata.append(entry_dict)
         (d / METADATA_FILE).write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
         config: dict[str, Any] = {
@@ -101,7 +150,14 @@ class VectorIndex:
         config = json.loads((d / INDEX_CONFIG_FILE).read_text(encoding="utf-8"))
 
         entries = [
-            IndexEntry(path=m["path"], kind=m["kind"], content_hash=m["content_hash"])
+            IndexEntry(
+                path=m["path"],
+                kind=m["kind"],
+                content_hash=m["content_hash"],
+                namespace=m.get("namespace", "default"),
+                record_type=m.get("record_type", ""),
+                metadata=m.get("metadata", {}),
+            )
             for m in metadata
         ]
         return cls(
@@ -119,18 +175,30 @@ class VectorIndex:
         kind: str,
         content_hash: str,
         vector: Any,
+        *,
+        namespace: str = "default",
+        record_type: str = "",
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         """Insert or replace the vector for *path*."""
         if not HAS_NUMPY:
             raise ImportError("numpy is required")
 
+        new_entry = IndexEntry(
+            path=path,
+            kind=kind,
+            content_hash=content_hash,
+            namespace=namespace,
+            record_type=record_type,
+            metadata=metadata or {},
+        )
         for i, entry in enumerate(self.entries):
             if entry.path == path:
-                self.entries[i] = IndexEntry(path=path, kind=kind, content_hash=content_hash)
+                self.entries[i] = new_entry
                 self.vectors[i] = vector
                 return
 
-        self.entries.append(IndexEntry(path=path, kind=kind, content_hash=content_hash))
+        self.entries.append(new_entry)
         vec2d = _np.asarray(vector).reshape(1, -1)
         if self.vectors is None or self.vectors.shape[0] == 0:
             self.vectors = vec2d

@@ -1,7 +1,9 @@
 from pathlib import Path
 import subprocess
 import sys
+import tarfile
 import tomllib
+import zipfile
 
 DIST_NAME_PREFIXES = ("repoctx-mcp-", "repoctx_mcp-")
 
@@ -33,3 +35,20 @@ def test_build_produces_wheel_and_sdist(tmp_path: Path) -> None:
     assert len(wheels) == 1
     assert sdists[0].name.startswith(DIST_NAME_PREFIXES)
     assert wheels[0].name.startswith(DIST_NAME_PREFIXES)
+
+    with tarfile.open(sdists[0], "r:gz") as sdist_archive:
+        sdist_names = sdist_archive.getnames()
+    assert any(name.endswith("docs/man/repoctx.1") for name in sdist_names)
+
+    with zipfile.ZipFile(wheels[0]) as wheel_archive:
+        wheel_names = wheel_archive.namelist()
+    assert any(name.endswith("share/man/man1/repoctx.1") for name in wheel_names)
+
+
+def test_man_page_documents_default_query_and_explicit_query_flags() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    man_page = (repo_root / "docs" / "man" / "repoctx.1").read_text(encoding="utf-8")
+
+    assert 'repoctx "refactor the auth middleware to support OAuth"' in man_page
+    assert "repoctx query" in man_page
+    assert "--repo /path/to/repo --format json" in man_page

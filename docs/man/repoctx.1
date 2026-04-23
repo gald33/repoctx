@@ -1,0 +1,101 @@
+.TH REPOCTX 1 "March 2026" "repoctx-mcp 0.3.0" "User Commands"
+.SH NAME
+repoctx \- local repository intelligence for coding agents
+.SH SYNOPSIS
+.B repoctx
+[\fB\-h\fR]
+.br
+.B repoctx
+\fItask\fR
+.br
+.B repoctx
+query \fItask\fR [\fB\-\-repo\fR \fIPATH\fR] [\fB\-\-format\fR \fBmarkdown\fR|\fBjson\fR]
+.br
+.B repoctx
+experiment [\fB\-\-repo\fR \fIPATH\fR]
+.br
+.B repoctx
+\fIcommand\fR [\fIargs\fR]
+.SH DESCRIPTION
+.B repoctx
+retrieves focused repository context for a coding task and can also manage local
+embedding indexes and controlled experiments.
+.PP
+If the first non-option argument is not a known subcommand,
+.B repoctx
+treats it as a query task.
+.SH COMMANDS
+.TP
+.B query
+Retrieve context for a task. This is the default command.
+.TP
+.B index
+Build the embedding index for a repository.
+.TP
+.B update
+Re-embed a single file in the index.
+.TP
+.B rebuild
+Delete and rebuild the embedding index.
+.TP
+.B experiment
+Launch or resume a guided control versus treatment experiment with paired worktrees.
+During the control lane, RepoCtx may stub MCP
+.B get_task_context
+responses until the treatment lane; timing is configured in
+.I ~/.repoctx/config.json
+(for example
+.IR experiment_mcp_suppress ", " experiment_mcp_idle_ttl_seconds ", and " experiment_mcp_extend_seconds "; see the README).
+.SH OPTIONS
+.TP
+.B \-h\fR, \fB\-\-help
+Show top-level help or command-specific help with
+.B repoctx COMMAND \-\-help .
+.PP
+When you need query-specific flags such as
+.B \-\-repo
+or
+.B \-\-format ,
+use the explicit
+.B repoctx query
+form.
+.SH EXAMPLES
+.TP
+Retrieve context for a task:
+.IP
+.EX
+repoctx "refactor the auth middleware to support OAuth"
+.EE
+.TP
+Request JSON output for an explicit repository:
+.IP
+.EX
+repoctx query "show me tests related to the billing webhook flow" --repo /path/to/repo --format json
+.EE
+.TP
+Build embeddings for a repository:
+.IP
+.EX
+repoctx index --repo /path/to/repo
+.EE
+.TP
+Launch the guided experiment wizard:
+.IP
+.EX
+repoctx experiment
+.EE
+.TP
+Start a controlled experiment session with a prewritten prompt:
+.IP
+.EX
+repoctx experiment "refactor the auth middleware to support OAuth"
+.EE
+.SH FILES
+.TP
+.I ~/.repoctx/config.json
+Optional RepoCtx user settings (for example experiment MCP suppression timing).
+.TP
+.I .repoctx/embeddings/
+Default repository-local embedding index directory.
+.SH SEE ALSO
+.BR python (1)

@@ -3,11 +3,14 @@ from decimal import Decimal
 from pathlib import Path
 
 from repoctx.telemetry import (
+    clear_active_experiment,
+    load_active_experiment,
     load_experiment_session,
     record_agent_run,
     record_experiment_lane,
     record_experiment_session,
     record_repoctx_invocation,
+    save_active_experiment,
 )
 
 
@@ -100,6 +103,8 @@ def test_record_experiment_session_writes_jsonl(tmp_path: Path) -> None:
         base_commit="abc1234",
         control_worktree=tmp_path / ".worktrees" / "control",
         repoctx_worktree=tmp_path / ".worktrees" / "repoctx",
+        label="strict-docs",
+        guardrail_mode="strict",
     )
 
     event_path = telemetry_dir / "experiment-runs.jsonl"
@@ -114,6 +119,8 @@ def test_record_experiment_session_writes_jsonl(tmp_path: Path) -> None:
     assert payload["repo_hash"] != str(tmp_path)
     assert payload["control_worktree"].endswith("/control")
     assert payload["repoctx_worktree"].endswith("/repoctx")
+    assert payload["label"] == "strict-docs"
+    assert payload["guardrail_mode"] == "strict"
 
 
 def test_record_experiment_lane_writes_jsonl_and_loads_session(tmp_path: Path) -> None:
@@ -174,3 +181,62 @@ def test_record_experiment_lane_writes_jsonl_and_loads_session(tmp_path: Path) -
     assert session["lanes"]["control"]["cost_delta_usd"] == "0.48"
     assert session["lanes"]["control"]["verification_status"] == "passed"
     assert "repoctx" not in session["lanes"]
+
+
+def test_active_experiment_state_round_trip(tmp_path: Path) -> None:
+    telemetry_dir = tmp_path / "telemetry"
+    repo_root = tmp_path / "repo-a"
+
+    assert load_active_experiment(telemetry_dir=telemetry_dir, repo_root=repo_root) is None
+
+    state_path = save_active_experiment(
+        telemetry_dir=telemetry_dir,
+        session_id="session-9",
+        repo_root=repo_root,
+    )
+    assert state_path.exists()
+    assert load_active_experiment(telemetry_dir=telemetry_dir, repo_root=repo_root) == {
+        "session_id": "session-9",
+        "repo_root": str(repo_root.resolve()),
+    }
+
+    clear_active_experiment(telemetry_dir=telemetry_dir, repo_root=repo_root)
+    assert load_active_experiment(telemetry_dir=telemetry_dir, repo_root=repo_root) is None
+
+
+def test_active_experiment_state_tracks_multiple_repos(tmp_path: Path) -> None:
+    telemetry_dir = tmp_path / "telemetry"
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+
+    save_active_experiment(telemetry_dir=telemetry_dir, session_id="session-a", repo_root=repo_a)
+    save_active_experiment(telemetry_dir=telemetry_dir, session_id="session-b", repo_root=repo_b)
+
+    assert load_active_experiment(telemetry_dir=telemetry_dir, repo_root=repo_a) == {
+        "session_id": "session-a",
+        "repo_root": str(repo_a.resolve()),
+    }
+    assert load_active_experiment(telemetry_dir=telemetry_dir, repo_root=repo_b) == {
+        "session_id": "session-b",
+        "repo_root": str(repo_b.resolve()),
+    }
+
+
+def test_load_active_experiment_ignores_invalid_json(tmp_path: Path) -> None:
+    telemetry_dir = tmp_path / "telemetry"
+    telemetry_dir.mkdir(parents=True, exist_ok=True)
+    state_path = telemetry_dir / "active-experiment.json"
+    state_path.write_text("{not-json}\n", encoding="utf-8")
+
+    assert load_active_experiment(telemetry_dir=telemetry_dir, repo_root=tmp_path / "repo-a") is None
+    assert not state_path.exists()
+
+
+def test_load_active_experiment_ignores_non_object_json(tmp_path: Path) -> None:
+    telemetry_dir = tmp_path / "telemetry"
+    telemetry_dir.mkdir(parents=True, exist_ok=True)
+    state_path = telemetry_dir / "active-experiment.json"
+    state_path.write_text("[]\n", encoding="utf-8")
+
+    assert load_active_experiment(telemetry_dir=telemetry_dir, repo_root=tmp_path / "repo-a") is None
+    assert not state_path.exists()
