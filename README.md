@@ -273,9 +273,16 @@ Not necessarily.
 
 ### How does RepoCtx choose the repo automatically?
 
-By default, RepoCtx uses the startup path from the MCP client and resolves it to the nearest enclosing git root. In practice, that means if the client starts RepoCtx inside a nested repository, RepoCtx focuses on that nested repo rather than walking up to a larger parent checkout.
+RepoCtx resolves the repo root in this order:
 
-If you want to override that automatic choice, pass `--repo /path/to/repo`.
+1. `--repo /path/to/repo` if passed — strongest override.
+2. `REPOCTX_REPO_ROOT` env var — for hosts with weak workspace context.
+3. Host workspace env vars (`CLAUDE_PROJECT_DIR`, `WORKSPACE_FOLDER_PATHS`, `VSCODE_CWD`) if set — lets Cursor / Claude Code / Claude Desktop auto-scope without per-repo config.
+4. `Path.cwd()` — fallback.
+
+Whatever candidate is chosen is then walked upward to the nearest `.git` entry (both `.git` directories and `.git` files are accepted, so linked worktrees and submodules work). If no git root is found, RepoCtx fails with a message naming both `--repo` and `REPOCTX_REPO_ROOT` so you can self-correct.
+
+Nested repositories resolve to the **nearest** repo, not the outermost parent.
 
 ### Can I test RepoCtx from the terminal first?
 

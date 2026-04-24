@@ -1,6 +1,7 @@
 import argparse
 import json
 import logging
+import os
 from pathlib import Path
 from time import perf_counter
 from uuid import uuid4
@@ -18,11 +19,80 @@ except ImportError:  # pragma: no cover - exercised in runtime environments with
     FastMCP = None
 
 
+# Env vars commonly populated by MCP hosts with a notion of "the active workspace".
+# Listed in preference order. Checked after an explicit --repo and REPOCTX_REPO_ROOT,
+# so hosts that expose workspace context get auto-detection for free.
+_HOST_WORKSPACE_ENV_VARS = (
+    "REPOCTX_REPO_ROOT",  # explicit override
+    "CLAUDE_PROJECT_DIR",  # Claude Code / Claude Desktop
+    "WORKSPACE_FOLDER_PATHS",  # Cursor
+    "VSCODE_CWD",  # VS Code-derived hosts
+)
+
+
+def resolve_repo_root(explicit: str | Path | None = None) -> Path:
+    """Resolve the repo root to inspect.
+
+    Resolution order:
+
+    1. ``explicit`` (the ``--repo`` flag or programmatic override) — strongest.
+    2. ``REPOCTX_REPO_ROOT`` env var — for hosts with weak workspace context.
+    3. Other host workspace env vars (``CLAUDE_PROJECT_DIR`` etc.) — best-effort.
+    4. ``Path.cwd()`` — fallback for CLI-style invocation.
+
+    The chosen candidate is then normalized to the nearest enclosing git root
+    (``.git`` directory or file — so worktrees and submodules are not excluded).
+    If no git root is found, raises ``RuntimeError`` with an actionable message
+    naming both ``--repo`` and ``REPOCTX_REPO_ROOT`` as overrides.
+    """
+    candidate, source = _pick_candidate(explicit)
+    candidate = candidate.resolve()
+    git_root = _find_git_root(candidate)
+    if git_root is None:
+        raise RuntimeError(
+            "repoctx could not resolve a git repository. "
+            f"Searched upward from {candidate} (via {source}). "
+            "Fix by passing --repo /path/to/repo or setting REPOCTX_REPO_ROOT."
+        )
+    return git_root
+
+
+def _pick_candidate(explicit: str | Path | None) -> tuple[Path, str]:
+    if explicit is not None and str(explicit) not in ("", "."):
+        return Path(explicit), "--repo"
+    # WORKSPACE_FOLDER_PATHS can contain multiple :-separated paths; take the first.
+    for var in _HOST_WORKSPACE_ENV_VARS:
+        raw = os.environ.get(var)
+        if not raw:
+            continue
+        first = raw.split(os.pathsep)[0].strip()
+        if first:
+            return Path(first), f"${var}"
+    if explicit is not None:  # e.g. explicit="." from argparse default
+        return Path(explicit), "--repo"
+    return Path.cwd(), "cwd"
+
+
+def _find_git_root(start: Path) -> Path | None:
+    """Walk upward from ``start`` until a ``.git`` entry is found.
+
+    Accepts both ``.git`` directories (plain repos) and ``.git`` files
+    (linked worktrees, submodules). Returns the repo root, or ``None`` if
+    none is found before reaching the filesystem root.
+    """
+    current = start if start.is_dir() else start.parent
+    for path in (current, *current.parents):
+        if (path / ".git").exists():
+            return path
+    return None
+
+
 def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path | None = None):
     if FastMCP is None:
         raise RuntimeError("The 'mcp' package is required to run the MCP server.")
 
-    resolved_root = Path(repo_root).resolve() if repo_root is not None else Path.cwd().resolve()
+    resolved_root = resolve_repo_root(repo_root)
+    logger.info("repoctx MCP server rooted at %s", resolved_root)
     server = FastMCP("repoctx")
 
     embedding_retriever = _try_load_embeddings(resolved_root)
@@ -219,8 +289,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run the RepoCtx MCP server")
     parser.add_argument(
         "--repo",
-        default=".",
-        help="Repository root to inspect (defaults to current working directory)",
+        default=None,
+        help=(
+            "Repository root to inspect. If omitted, repoctx auto-resolves by "
+            "checking REPOCTX_REPO_ROOT, then common host workspace env vars, "
+            "then walking up from the current working directory to the nearest "
+            ".git root."
+        ),
     )
     args = parser.parse_args()
 
