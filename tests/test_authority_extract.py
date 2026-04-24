@@ -41,6 +41,21 @@ def test_parse_front_matter_absent():
     assert rest.startswith("# Title")
 
 
+def test_extract_heading_bullets_joins_soft_wrapped_lines():
+    text = (
+        "## Invariants\n"
+        "- The bundle schema version is `repoctx-bundle/1`; bumping it requires a\n"
+        "  new major-version release and a migration note in the design doc.\n"
+        "- second rule stays on one line\n"
+    )
+    sections = dict(extract_heading_bullets(text))
+    assert sections["invariants"][0] == (
+        "The bundle schema version is `repoctx-bundle/1`; bumping it requires a "
+        "new major-version release and a migration note in the design doc."
+    )
+    assert sections["invariants"][1] == "second rule stays on one line"
+
+
 def test_extract_heading_bullets_only_collects_constraint_sections():
     text = (
         "## Summary\n"

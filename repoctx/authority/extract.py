@@ -71,7 +71,12 @@ def parse_front_matter(text: str) -> tuple[dict[str, object], str]:
 
 
 def extract_heading_bullets(text: str) -> list[tuple[str, list[str]]]:
-    """Return ``[(heading_title_lower, [bullet_items])]`` for constraint headings."""
+    """Return ``[(heading_title_lower, [bullet_items])]`` for constraint headings.
+
+    Soft-wrapped bullets are joined: an indented, non-empty line that is not a
+    new bullet or heading is appended to the previous bullet's text. This
+    matches common markdown style where long rules wrap across lines.
+    """
     sections: list[tuple[str, list[str]]] = []
     current: tuple[str, list[str]] | None = None
 
@@ -95,6 +100,9 @@ def extract_heading_bullets(text: str) -> list[tuple[str, list[str]]]:
             item = bullet.group("item").strip()
             if item:
                 current[1].append(item)
+            continue
+        if line.startswith((" ", "\t")) and line.strip() and current[1]:
+            current[1][-1] = f"{current[1][-1]} {line.strip()}"
 
     if current is not None:
         sections.append(current)
