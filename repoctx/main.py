@@ -3,6 +3,7 @@ import json
 import logging
 import sys
 from decimal import Decimal, InvalidOperation
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
 from time import perf_counter
 from uuid import uuid4
@@ -72,12 +73,24 @@ Common workflows:
 """
 
 
+def _installed_version() -> str:
+    try:
+        return _pkg_version("repoctx-mcp")
+    except PackageNotFoundError:
+        return "unknown"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Local repository intelligence for coding agents",
         usage=HELP_USAGE,
         epilog=HELP_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"repoctx {_installed_version()}",
     )
     sub = parser.add_subparsers(
         dest="command",
