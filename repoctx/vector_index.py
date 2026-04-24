@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from repoctx.record import MetadataFilter
+
 if TYPE_CHECKING:
     import numpy as np
 
@@ -35,6 +37,12 @@ class IndexEntry:
     namespace: str = "default"
     record_type: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    parent_id: str | None = None
+    embedding_ref: str | None = None
+
+    @property
+    def id(self) -> str:
+        return self.path
 
 
 @dataclass
@@ -70,8 +78,9 @@ class VectorIndex:
         query_vector: Any,
         *,
         namespace: str | None = None,
+        namespaces: list[str] | None = None,
         record_types: list[str] | None = None,
-        metadata_filters: list[tuple[str, list[Any]]] | None = None,
+        metadata_filters: list[MetadataFilter] | None = None,
     ) -> list[tuple[str, float, IndexEntry]]:
         """Score every entry against *query_vector* with optional filtering.
 
@@ -82,17 +91,17 @@ class VectorIndex:
             return []
         scores = self.vectors @ query_vector
         results: list[tuple[str, float, IndexEntry]] = []
+        ns_set = set(namespaces) if namespaces else None
         rt_set = set(record_types) if record_types else None
         for i, entry in enumerate(self.entries):
             if namespace is not None and entry.namespace != namespace:
                 continue
+            if ns_set is not None and entry.namespace not in ns_set:
+                continue
             if rt_set is not None and entry.record_type not in rt_set:
                 continue
             if metadata_filters:
-                if not all(
-                    entry.metadata.get(key) in vals
-                    for key, vals in metadata_filters
-                ):
+                if not all(f.matches(entry.metadata) for f in metadata_filters):
                     continue
             results.append((entry.path, float(scores[i]), entry))
         results.sort(key=lambda t: -t[1])
@@ -121,6 +130,10 @@ class VectorIndex:
                 entry_dict["record_type"] = e.record_type
             if e.metadata:
                 entry_dict["metadata"] = e.metadata
+            if e.parent_id is not None:
+                entry_dict["parent_id"] = e.parent_id
+            if e.embedding_ref is not None:
+                entry_dict["embedding_ref"] = e.embedding_ref
             metadata.append(entry_dict)
         (d / METADATA_FILE).write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
@@ -157,6 +170,8 @@ class VectorIndex:
                 namespace=m.get("namespace", "default"),
                 record_type=m.get("record_type", ""),
                 metadata=m.get("metadata", {}),
+                parent_id=m.get("parent_id"),
+                embedding_ref=m.get("embedding_ref"),
             )
             for m in metadata
         ]
@@ -179,6 +194,8 @@ class VectorIndex:
         namespace: str = "default",
         record_type: str = "",
         metadata: dict[str, Any] | None = None,
+        parent_id: str | None = None,
+        embedding_ref: str | None = None,
     ) -> None:
         """Insert or replace the vector for *path*."""
         if not HAS_NUMPY:
@@ -191,6 +208,8 @@ class VectorIndex:
             namespace=namespace,
             record_type=record_type,
             metadata=metadata or {},
+            parent_id=parent_id,
+            embedding_ref=embedding_ref,
         )
         for i, entry in enumerate(self.entries):
             if entry.path == path:

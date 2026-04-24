@@ -9,15 +9,16 @@ from __future__ import annotations
 import hashlib
 import logging
 from pathlib import Path, PurePosixPath
-from time import perf_counter
 from typing import TYPE_CHECKING
 
+from repoctx.adapters.repo import REPO_NAMESPACE, build_record_store, file_record_to_retrievable
 from repoctx.config import DEFAULT_EMBEDDING_CONFIG, EmbeddingConfig
 from repoctx.models import FileRecord
 
 if TYPE_CHECKING:
     import numpy as np
 
+    from repoctx.core import RecordStore
     from repoctx.vector_index import VectorIndex
 
 logger = logging.getLogger(__name__)
@@ -89,12 +90,26 @@ class EmbeddingModel:
 class EmbeddingRetriever:
     """Bundles a loaded model and vector index for query-time scoring."""
 
-    def __init__(self, model: EmbeddingModel, index: VectorIndex) -> None:
+    def __init__(self, model: EmbeddingModel, index: VectorIndex, store=None) -> None:
         self.model = model
         self.index = index
+        self.store = store
 
     def query_scores(self, task: str) -> dict[str, float]:
         """Return {path: cosine_similarity} for every indexed file."""
+        if self.store is not None:
+            from repoctx.record import MetadataFilter, RetrievalQuery
+
+            results = self.store.query(
+                RetrievalQuery(
+                    text=task,
+                    top_k=max(len(self.store), 1),
+                    namespaces=[REPO_NAMESPACE],
+                    metadata_filters=[MetadataFilter(key="path", values=[""], operator="exists")],
+                ),
+                self.model,
+            )
+            return {result.record_id: result.score for result in results}
         query_vec = self.model.encode_query(task)
         return self.index.similarity_scores(query_vec)
 
@@ -108,12 +123,12 @@ def try_load_retriever(
         logger.debug("Embedding dependencies not installed – skipping")
         return None
     try:
-        from repoctx.vector_index import VectorIndex
+        from repoctx.core import RecordStore
 
         index_dir = Path(repo_root).resolve() / config.index_dir / "embeddings"
-        index = VectorIndex.load(index_dir)
+        store = RecordStore.load(index_dir)
         model = EmbeddingModel(config)
-        return EmbeddingRetriever(model=model, index=index)
+        return EmbeddingRetriever(model=model, index=store._vec_index, store=store)
     except Exception as exc:
         logger.info("Embeddings not available: %s", exc)
         return None
@@ -122,40 +137,15 @@ def try_load_retriever(
 def build_index(
     repo_root: str | Path,
     config: EmbeddingConfig = DEFAULT_EMBEDDING_CONFIG,
-) -> VectorIndex:
-    """Scan a repository, embed every file, and return a VectorIndex.
+) -> RecordStore:
+    """Scan a repository, embed every file, and return a populated RecordStore.
 
-    Caller is responsible for persisting the index with ``index.save(…)``.
+    Caller is responsible for persisting the index with ``store.save(…)``.
     """
-    from repoctx.scanner import scan_repository
-    from repoctx.vector_index import VectorIndex
-
-    root = Path(repo_root).resolve()
-    repo_index = scan_repository(root)
-    model = EmbeddingModel(config)
-
-    records: list[FileRecord] = list(repo_index.records.values())
-    texts = [build_enriched_text(r, config.max_content_chars) for r in records]
-    hashes = [content_hash(r.content) for r in records]
-
-    logger.info("Embedding %d files …", len(texts))
-    started = perf_counter()
-    vectors = model.encode_documents(texts)
-    elapsed = perf_counter() - started
-    logger.info("Embedded %d files in %.1f s", len(texts), elapsed)
-
-    from repoctx.vector_index import IndexEntry
-
-    entries = [
-        IndexEntry(path=r.path, kind=r.kind, content_hash=h)
-        for r, h in zip(records, hashes)
-    ]
-    return VectorIndex(
-        vectors=vectors,
-        entries=entries,
-        model_name=config.model_name,
-        dimension=model.dimension,
-    )
+    store = build_record_store(repo_root, DefaultEmbeddingProvider(config), show_progress=True)
+    if len(store) == 0:
+        raise ValueError("Failed to build embedding index")
+    return store
 
 
 def update_file_in_index(
@@ -164,13 +154,13 @@ def update_file_in_index(
     config: EmbeddingConfig = DEFAULT_EMBEDDING_CONFIG,
 ) -> None:
     """Re-embed a single file and update the persisted index on disk."""
+    from repoctx.core import RecordStore
     from repoctx.scanner import scan_repository
-    from repoctx.vector_index import VectorIndex
 
     root = Path(repo_root).resolve()
     index_dir = root / config.index_dir / "embeddings"
-    vec_index = VectorIndex.load(index_dir)
-    model = EmbeddingModel(config)
+    store = RecordStore.load(index_dir)
+    provider = DefaultEmbeddingProvider(config)
 
     repo_index = scan_repository(root)
     rel_path = Path(file_path).as_posix()
@@ -181,9 +171,28 @@ def update_file_in_index(
     if record is None:
         raise FileNotFoundError(f"File not found in repository index: {file_path}")
 
-    text = build_enriched_text(record, config.max_content_chars)
-    vector = model.encode_documents([text], show_progress=False)[0]
-    chash = content_hash(record.content)
-    vec_index.update_entry(rel_path, record.kind, chash, vector)
-    vec_index.save(index_dir)
+    retrievable = file_record_to_retrievable(record, root)
+    store.add_record(retrievable, provider)
+    store.save(index_dir)
     logger.info("Updated embedding for %s", rel_path)
+
+
+class DefaultEmbeddingProvider:
+    """Embedding provider implementation that reuses the existing model stack."""
+
+    def __init__(self, config: EmbeddingConfig = DEFAULT_EMBEDDING_CONFIG) -> None:
+        self._model = EmbeddingModel(config)
+
+    @property
+    def dimension(self) -> int:
+        return self._model.dimension
+
+    @property
+    def model_name(self) -> str:
+        return self._model.config.model_name
+
+    def encode_texts(self, texts: list[str], *, show_progress: bool = True):
+        return self._model.encode_documents(texts, show_progress=show_progress)
+
+    def encode_query(self, text: str):
+        return self._model.encode_query(text)

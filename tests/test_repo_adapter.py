@@ -6,10 +6,32 @@ from pathlib import Path
 
 from repoctx.adapters.repo import (
     REPO_NAMESPACE,
+    RepoRecordProducer,
+    build_record_store,
     file_record_to_retrievable,
     scan_to_records,
 )
+from repoctx.core import RecordStore
 from repoctx.models import FileRecord
+
+import pytest
+
+numpy = pytest.importorskip("numpy")
+
+
+class FakeProvider:
+    def __init__(self, dim: int = 8) -> None:
+        self._dim = dim
+
+    @property
+    def dimension(self) -> int:
+        return self._dim
+
+    def encode_texts(self, texts: list[str], *, show_progress: bool = True) -> numpy.ndarray:
+        return numpy.ones((len(texts), self._dim), dtype=numpy.float32)
+
+    def encode_query(self, text: str) -> numpy.ndarray:
+        return numpy.ones((self._dim,), dtype=numpy.float32)
 
 
 def write_file(path: Path, content: str) -> None:
@@ -131,3 +153,26 @@ def test_scan_to_records_preserves_index_compatibility(tmp_path: Path) -> None:
         graph=graph,
     )
     assert result.summary
+
+
+def test_repo_record_producer_builds_records(tmp_path: Path) -> None:
+    write_file(tmp_path / "README.md", "# Docs\n")
+    write_file(tmp_path / "src" / "worker.py", "def run():\n    return 1\n")
+
+    producer = RepoRecordProducer(tmp_path)
+    records = producer.build_records()
+
+    assert records
+    assert all(record.namespace == REPO_NAMESPACE for record in records)
+    assert {record.record_type for record in records} >= {"doc_chunk", "code_chunk"}
+
+
+def test_build_record_store_uses_shared_core(tmp_path: Path) -> None:
+    write_file(tmp_path / "src" / "auth.py", "def authenticate():\n    return True\n")
+    write_file(tmp_path / "README.md", "# Auth service\n")
+
+    store = build_record_store(tmp_path, FakeProvider())
+
+    assert isinstance(store, RecordStore)
+    assert len(store) == 2
+    assert store.namespaces == {REPO_NAMESPACE}

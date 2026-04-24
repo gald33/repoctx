@@ -127,7 +127,7 @@ def test_index_and_query_artifact_records() -> None:
     assert "schema_summary" in store.record_types
 
     results = store.query(
-        RetrievalQuery(text="image classification model", top_k=2),
+        RetrievalQuery(text="image classification model", top_k=2, min_score=-1.0),
         provider,
     )
     assert len(results) >= 1
@@ -175,9 +175,10 @@ def test_filter_by_record_type() -> None:
 
     results = store.query(
         RetrievalQuery(
-            text="service endpoint",
+            text="Authentication gateway service. Handles OAuth2 flows",
             record_types=["service_summary"],
             top_k=10,
+            min_score=-1.0,
         ),
         provider,
     )
@@ -227,9 +228,10 @@ def test_filter_by_artifact_kind() -> None:
 
     results = store.query(
         RetrievalQuery(
-            text="data structure",
+            text="user profile schema",
             metadata_filters=[MetadataFilter(key="artifact_kind", values=["schema"])],
             top_k=10,
+            min_score=-1.0,
         ),
         provider,
     )

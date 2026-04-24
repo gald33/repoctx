@@ -1,42 +1,24 @@
 """Domain-agnostic retrieval core.
 
-This module provides the shared retrieval engine that operates on
-:class:`RetrievableRecord` instances.  It owns:
-
-- record indexing (text → embedding → vector store)
-- query execution (query text → scored results)
-- metadata filtering
-- top-k retrieval
-
-It does **not** assume file paths, chunk ordering, or any repo-specific
-semantics.  Domain adapters (e.g. the repo adapter) are responsible for
-producing records and interpreting results.
+The core owns embedding, indexing, persistence, and filtered query execution.
+Adapters are responsible for producing ``RetrievableRecord`` instances from a
+domain such as a repository checkout or an artifact registry export.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
-from repoctx.record import (
-    MetadataFilter,
-    RetrievableRecord,
-    RetrievalQuery,
-    RetrievalResult,
-)
-
-if TYPE_CHECKING:
-    import numpy as np
+from repoctx.record import RetrievableRecord, RetrievalQuery, RetrievalResult
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Embedding interface (protocol so callers can supply their own)
-# ---------------------------------------------------------------------------
+RECORDS_FILE = "records.json"
 
 
 @runtime_checkable
@@ -47,21 +29,22 @@ class EmbeddingProvider(Protocol):
     def dimension(self) -> int: ...
 
     def encode_texts(self, texts: list[str], *, show_progress: bool = True) -> Any:
-        """Return an (N, dim) array of L2-normalised vectors."""
-        ...
+        """Return an ``(N, dim)`` array of L2-normalized vectors."""
 
     def encode_query(self, text: str) -> Any:
-        """Return a (dim,) L2-normalised query vector."""
-        ...
+        """Return a ``(dim,)`` L2-normalized query vector."""
 
 
-# ---------------------------------------------------------------------------
-# Default embedding provider (wraps repoctx.embeddings.EmbeddingModel)
-# ---------------------------------------------------------------------------
+@runtime_checkable
+class RecordProducer(Protocol):
+    """Adapter protocol for anything that can produce retrievable records."""
+
+    def build_records(self) -> list[RetrievableRecord]:
+        """Return the records the retrieval core should index."""
 
 
 class DefaultEmbeddingProvider:
-    """Adapts :class:`repoctx.embeddings.EmbeddingModel` to :class:`EmbeddingProvider`."""
+    """Adapts ``repoctx.embeddings.EmbeddingModel`` to the generic provider."""
 
     def __init__(self) -> None:
         from repoctx.embeddings import EmbeddingModel
@@ -72,16 +55,15 @@ class DefaultEmbeddingProvider:
     def dimension(self) -> int:
         return self._model.dimension
 
+    @property
+    def model_name(self) -> str:
+        return self._model.config.model_name
+
     def encode_texts(self, texts: list[str], *, show_progress: bool = True) -> Any:
         return self._model.encode_documents(texts, show_progress=show_progress)
 
     def encode_query(self, text: str) -> Any:
         return self._model.encode_query(text)
-
-
-# ---------------------------------------------------------------------------
-# RecordStore – persistent record index backed by VectorIndex
-# ---------------------------------------------------------------------------
 
 
 def _record_content_hash(text: str) -> str:
@@ -90,11 +72,7 @@ def _record_content_hash(text: str) -> str:
 
 @dataclass
 class RecordStore:
-    """Stores :class:`RetrievableRecord` embeddings and supports filtered retrieval.
-
-    Wraps :class:`VectorIndex` internally, translating between
-    the generic record model and the low-level vector storage.
-    """
+    """Stores record embeddings and supports metadata-aware retrieval."""
 
     _vec_index: Any = field(default=None, repr=False)
     _record_map: dict[str, RetrievableRecord] = field(default_factory=dict)
@@ -106,8 +84,6 @@ class RecordStore:
             return 0
         return len(self._vec_index)
 
-    # -- indexing -----------------------------------------------------------
-
     def index_records(
         self,
         records: list[RetrievableRecord],
@@ -115,27 +91,29 @@ class RecordStore:
         *,
         show_progress: bool = True,
     ) -> None:
-        """Embed and store *records* in one batch."""
+        """Embed and replace the index contents with ``records``."""
         from repoctx.vector_index import IndexEntry, VectorIndex
 
         if not records:
             return
 
-        texts = [r.text for r in records]
-        vectors = provider.encode_texts(texts, show_progress=show_progress)
-
+        vectors = provider.encode_texts(
+            [record.canonical_text for record in records],
+            show_progress=show_progress,
+        )
         entries = [
             IndexEntry(
-                path=r.id,
-                kind=r.record_type,
-                content_hash=_record_content_hash(r.text),
-                namespace=r.namespace,
-                record_type=r.record_type,
-                metadata=r.metadata,
+                path=record.id,
+                kind=record.record_type,
+                content_hash=record.embedding_ref or _record_content_hash(record.canonical_text),
+                namespace=record.namespace,
+                record_type=record.record_type,
+                metadata=dict(record.metadata),
+                parent_id=record.parent_id,
+                embedding_ref=record.embedding_ref,
             )
-            for r in records
+            for record in records
         ]
-
         self._vec_index = VectorIndex(
             vectors=vectors,
             entries=entries,
@@ -144,9 +122,19 @@ class RecordStore:
         )
         self.model_name = self._vec_index.model_name
         self.dimension = self._vec_index.dimension
+        self._record_map = {record.id: record for record in records}
 
-        for r in records:
-            self._record_map[r.id] = r
+    def index_producer(
+        self,
+        producer: RecordProducer,
+        provider: EmbeddingProvider,
+        *,
+        show_progress: bool = True,
+    ) -> list[RetrievableRecord]:
+        """Build records through an adapter and index them."""
+        records = producer.build_records()
+        self.index_records(records, provider, show_progress=show_progress)
+        return records
 
     def add_record(
         self,
@@ -158,19 +146,19 @@ class RecordStore:
             self.index_records([record], provider, show_progress=False)
             return
 
-        vec = provider.encode_texts([record.text], show_progress=False)[0]
+        vector = provider.encode_texts([record.canonical_text], show_progress=False)[0]
         self._vec_index.update_entry(
             path=record.id,
             kind=record.record_type,
-            content_hash=_record_content_hash(record.text),
-            vector=vec,
+            content_hash=record.embedding_ref or _record_content_hash(record.canonical_text),
+            vector=vector,
             namespace=record.namespace,
             record_type=record.record_type,
-            metadata=record.metadata,
+            metadata=dict(record.metadata),
+            parent_id=record.parent_id,
+            embedding_ref=record.embedding_ref,
         )
         self._record_map[record.id] = record
-
-    # -- querying ----------------------------------------------------------
 
     def query(
         self,
@@ -181,57 +169,95 @@ class RecordStore:
         if self._vec_index is None:
             return []
 
-        query_vec = provider.encode_query(q.text)
-
-        mf: list[tuple[str, list[Any]]] | None = None
-        if q.metadata_filters:
-            mf = [(f.key, f.values) for f in q.metadata_filters]
-
-        raw = self._vec_index.similarity_scores_by_id(
-            query_vec,
+        raw_results = self._vec_index.similarity_scores_by_id(
+            provider.encode_query(q.text),
             namespace=q.namespace,
+            namespaces=q.selected_namespaces(),
             record_types=q.record_types,
-            metadata_filters=mf,
+            metadata_filters=q.metadata_filters,
         )
 
         results: list[RetrievalResult] = []
-        for entry_id, score, entry in raw:
+        for record_id, score, entry in raw_results:
             if score < q.min_score:
                 continue
+            record = self._record_map.get(record_id)
             results.append(
                 RetrievalResult(
-                    record_id=entry_id,
+                    record_id=record_id,
                     score=score,
                     record_type=entry.record_type,
                     namespace=entry.namespace,
-                    metadata=entry.metadata,
+                    metadata=dict(record.metadata if record is not None else entry.metadata),
+                    parent_id=record.parent_id if record is not None else entry.parent_id,
                 )
             )
             if len(results) >= q.top_k:
                 break
-
         return results
 
-    # -- persistence -------------------------------------------------------
+    def similarity_scores(
+        self,
+        text: str,
+        provider: EmbeddingProvider,
+        *,
+        namespace: str | None = None,
+        namespaces: list[str] | None = None,
+        record_types: list[str] | None = None,
+    ) -> dict[str, float]:
+        """Compatibility helper for callers that still want ``id -> score``."""
+        query = RetrievalQuery(
+            text=text,
+            top_k=max(len(self), 1),
+            namespace=namespace,
+            namespaces=namespaces,
+            record_types=record_types,
+        )
+        return {result.record_id: result.score for result in self.query(query, provider)}
 
     def save(self, index_dir: str | Path) -> None:
         if self._vec_index is None:
             raise ValueError("Nothing to save – index is empty")
-        self._vec_index.save(index_dir)
+        index_path = Path(index_dir)
+        index_path.mkdir(parents=True, exist_ok=True)
+        self._vec_index.save(index_path)
+        records_payload = [record.to_dict() for record in self._record_map.values()]
+        (index_path / RECORDS_FILE).write_text(
+            json.dumps(records_payload, indent=2),
+            encoding="utf-8",
+        )
 
     @classmethod
     def load(cls, index_dir: str | Path) -> RecordStore:
         from repoctx.vector_index import VectorIndex
 
-        vec_index = VectorIndex.load(index_dir)
-        store = cls(
+        index_path = Path(index_dir)
+        vec_index = VectorIndex.load(index_path)
+        record_map: dict[str, RetrievableRecord] = {}
+        records_path = index_path / RECORDS_FILE
+        if records_path.exists():
+            payload = json.loads(records_path.read_text(encoding="utf-8"))
+            record_map = {
+                record.id: record
+                for record in (RetrievableRecord.from_dict(item) for item in payload)
+            }
+        else:
+            for entry in vec_index.entries:
+                record_map[entry.id] = RetrievableRecord(
+                    id=entry.id,
+                    text="",
+                    record_type=entry.record_type or entry.kind,
+                    namespace=entry.namespace,
+                    metadata=dict(entry.metadata),
+                    parent_id=entry.parent_id,
+                    embedding_ref=entry.embedding_ref,
+                )
+        return cls(
             _vec_index=vec_index,
+            _record_map=record_map,
             model_name=vec_index.model_name,
             dimension=vec_index.dimension,
         )
-        return store
-
-    # -- introspection -----------------------------------------------------
 
     def get_record(self, record_id: str) -> RetrievableRecord | None:
         return self._record_map.get(record_id)
@@ -240,10 +266,37 @@ class RecordStore:
     def namespaces(self) -> set[str]:
         if self._vec_index is None:
             return set()
-        return {e.namespace for e in self._vec_index.entries}
+        return {entry.namespace for entry in self._vec_index.entries}
 
     @property
     def record_types(self) -> set[str]:
         if self._vec_index is None:
             return set()
-        return {e.record_type for e in self._vec_index.entries if e.record_type}
+        return {entry.record_type for entry in self._vec_index.entries if entry.record_type}
+
+
+class RetrievalEngine:
+    """Thin orchestration wrapper around a ``RecordStore`` and provider."""
+
+    def __init__(self, store: RecordStore, provider: EmbeddingProvider) -> None:
+        self.store = store
+        self.provider = provider
+
+    def query(self, query: RetrievalQuery) -> list[RetrievalResult]:
+        return self.store.query(query, self.provider)
+
+    def similarity_scores(
+        self,
+        text: str,
+        *,
+        namespace: str | None = None,
+        namespaces: list[str] | None = None,
+        record_types: list[str] | None = None,
+    ) -> dict[str, float]:
+        return self.store.similarity_scores(
+            text,
+            self.provider,
+            namespace=namespace,
+            namespaces=namespaces,
+            record_types=record_types,
+        )

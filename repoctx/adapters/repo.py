@@ -1,15 +1,8 @@
-"""Repository adapter – bridges the existing repo scanner to the generic record model.
-
-This adapter:
-- Traverses a repository using :func:`repoctx.scanner.scan_repository`
-- Converts each :class:`FileRecord` into a :class:`RetrievableRecord`
-- Preserves all repo-specific metadata (path, language, kind, doc_score)
-  inside the record's metadata map
-- Provides helpers to build a :class:`RecordStore` from a repository
-"""
+"""Repository adapter that translates repository files into generic records."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
@@ -35,6 +28,25 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".yaml": "yaml",
     ".yml": "yaml",
 }
+
+
+@dataclass(slots=True)
+class RepoRecordProducer:
+    """Build retrievable records from a repository checkout."""
+
+    repo_root: Path
+    config: RepoCtxConfig = DEFAULT_CONFIG
+
+    def scan(self) -> RepositoryIndex:
+        return scan_repository(self.repo_root, config=self.config)
+
+    def build_records(self) -> list[RetrievableRecord]:
+        index = self.scan()
+        return [file_record_to_retrievable(record, self.repo_root) for record in index.records.values()]
+
+    def scan_to_records(self) -> tuple[RepositoryIndex, list[RetrievableRecord]]:
+        index = self.scan()
+        return index, [file_record_to_retrievable(record, self.repo_root) for record in index.records.values()]
 
 
 def file_record_to_retrievable(record: FileRecord, repo_root: Path) -> RetrievableRecord:
@@ -83,13 +95,8 @@ def scan_to_records(
     The :class:`RepositoryIndex` is returned so callers that still need the
     legacy retriever (heuristic ranking, dependency graph, etc.) can use it.
     """
-    root = Path(repo_root).resolve()
-    index = scan_repository(root, config=config)
-    records = [
-        file_record_to_retrievable(fr, root)
-        for fr in index.records.values()
-    ]
-    return index, records
+    producer = RepoRecordProducer(Path(repo_root).resolve(), config=config)
+    return producer.scan_to_records()
 
 
 def build_record_store(
@@ -102,9 +109,9 @@ def build_record_store(
     """Scan a repo and return a populated :class:`RecordStore`."""
     from repoctx.core import RecordStore
 
-    _, records = scan_to_records(repo_root, config)
+    producer = RepoRecordProducer(Path(repo_root).resolve(), config=config)
     store = RecordStore()
-    store.index_records(records, provider, show_progress=show_progress)
+    store.index_producer(producer, provider, show_progress=show_progress)
     return store
 
 

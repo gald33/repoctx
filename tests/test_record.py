@@ -24,6 +24,8 @@ def test_retrievable_record_with_metadata() -> None:
     assert r.record_type == "artifact_summary"
     assert r.metadata["language"] == "python"
     assert r.parent_id == "art-parent"
+    assert r.source_namespace == "registry"
+    assert r.canonical_text == "Artifact summary text"
 
 
 def test_metadata_filter_matches() -> None:
@@ -40,10 +42,23 @@ def test_metadata_filter_multiple_values() -> None:
     assert not f.matches({"language": "rust"})
 
 
+def test_metadata_filter_prefix_operator() -> None:
+    f = MetadataFilter(key="path", values=["src/auth"], operator="prefix")
+    assert f.matches({"path": "src/auth/login.py"})
+    assert not f.matches({"path": "tests/test_login.py"})
+
+
+def test_metadata_filter_exists_operator() -> None:
+    f = MetadataFilter(key="path", operator="exists")
+    assert f.matches({"path": "src/app.py"})
+    assert not f.matches({"language": "python"})
+
+
 def test_retrieval_query_defaults() -> None:
     q = RetrievalQuery(text="find auth code")
     assert q.top_k == 10
     assert q.namespace is None
+    assert q.namespaces is None
     assert q.record_types is None
     assert q.metadata_filters is None
     assert q.min_score == 0.0
@@ -62,6 +77,7 @@ def test_retrieval_query_with_filters() -> None:
     assert q.record_types == ["code_chunk"]
     assert len(q.metadata_filters) == 1
     assert q.min_score == 0.3
+    assert q.selected_namespaces() == ["repo"]
 
 
 def test_retrieval_result_fields() -> None:

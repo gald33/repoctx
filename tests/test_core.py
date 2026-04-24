@@ -169,6 +169,24 @@ def test_query_filters_by_namespace() -> None:
     assert all(r.namespace == "repo" for r in results)
 
 
+def test_query_filters_by_multiple_namespaces() -> None:
+    store = RecordStore()
+    provider = FakeProvider()
+    records = [
+        RetrievableRecord(id="repo:0", text="topic repo", record_type="code_chunk", namespace="repo"),
+        RetrievableRecord(id="registry:0", text="topic registry", record_type="artifact_summary", namespace="registry"),
+        RetrievableRecord(id="docs:0", text="topic docs", record_type="doc_chunk", namespace="docs"),
+    ]
+    store.index_records(records, provider)
+
+    results = store.query(
+        RetrievalQuery(text="topic repo", namespaces=["repo", "registry"], top_k=20, min_score=-1.0),
+        provider,
+    )
+    assert results
+    assert {r.namespace for r in results}.issubset({"repo", "registry"})
+
+
 def test_query_filters_by_record_type() -> None:
     store = RecordStore()
     provider = FakeProvider()
@@ -195,6 +213,40 @@ def test_query_filters_by_metadata() -> None:
         provider,
     )
     assert all(r.metadata.get("language") == "python" for r in results)
+
+
+def test_query_filters_by_metadata_prefix() -> None:
+    store = RecordStore()
+    provider = FakeProvider()
+    records = [
+        RetrievableRecord(
+            id="src/auth/login.py",
+            text="Authentication login handler",
+            record_type="code_chunk",
+            namespace="repo",
+            metadata={"path": "src/auth/login.py", "language": "python"},
+        ),
+        RetrievableRecord(
+            id="src/billing/invoice.py",
+            text="Billing invoice handler",
+            record_type="code_chunk",
+            namespace="repo",
+            metadata={"path": "src/billing/invoice.py", "language": "python"},
+        ),
+    ]
+    store.index_records(records, provider)
+
+    results = store.query(
+        RetrievalQuery(
+            text="handler",
+            metadata_filters=[MetadataFilter(key="path", values=["src/auth"], operator="prefix")],
+            top_k=10,
+            min_score=-1.0,
+        ),
+        provider,
+    )
+    assert results
+    assert all(r.metadata.get("path", "").startswith("src/auth") for r in results)
 
 
 def test_query_min_score_filtering() -> None:
@@ -233,7 +285,7 @@ def test_query_combined_filters() -> None:
 
     results = store.query(
         RetrievalQuery(
-            text="Python",
+            text="Python artifact summary",
             namespace="registry",
             record_types=["artifact_summary"],
             metadata_filters=[MetadataFilter(key="language", values=["python"])],
@@ -261,6 +313,7 @@ def test_save_and_load(tmp_path: Path) -> None:
     assert len(loaded) == 3
     assert loaded.namespaces == {"repo"}
     assert "code_chunk" in loaded.record_types
+    assert loaded.get_record("record_0") is not None
 
 
 def test_save_empty_store_raises(tmp_path: Path) -> None:
