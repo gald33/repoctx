@@ -119,8 +119,17 @@ def _compute_scope(
     authority_records: list[AuthorityRecord],
     constraints: list[Constraint],
 ) -> EditScope:
-    allowed = sorted({p.path for p in relevant_files[:6]})
-    related = sorted({p.path for p in relevant_files[6:]})
+    # Dunder package files (__init__.py, __main__.py) rarely carry the
+    # actual logic a task targets — they get demoted to related so the
+    # allowed set reflects files an agent would actually edit.
+    def _is_boilerplate(path: str) -> bool:
+        name = PurePosixPath(path).name
+        return name.startswith("__") and name.endswith(".py")
+
+    primary = [p for p in relevant_files if not _is_boilerplate(p.path)]
+    secondary = [p for p in relevant_files if _is_boilerplate(p.path)]
+    allowed = sorted({p.path for p in primary[:6]})
+    related = sorted({p.path for p in primary[6:]} | {p.path for p in secondary})
     protected: set[str] = set()
     for r in authority_records:
         if r.authority_level == AuthorityLevel.HARD:
