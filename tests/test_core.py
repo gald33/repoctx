@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -21,7 +22,15 @@ from repoctx.record import (
 
 
 class FakeProvider:
-    """Deterministic provider that hashes text into a unit vector."""
+    """Deterministic bag-of-words provider.
+
+    Each lowercased word maps to a fixed random unit vector (seeded from a
+    stable ``sha256`` digest — not Python's built-in ``hash()``, which is
+    randomised per-process via ``PYTHONHASHSEED`` and would make results
+    non-reproducible across runs). A text's embedding is the L2-normalised
+    sum of its word vectors, so texts sharing words have positive cosine
+    similarity — close enough to real embedding behaviour for filter tests.
+    """
 
     def __init__(self, dim: int = 32) -> None:
         self._dim = dim
@@ -36,10 +45,20 @@ class FakeProvider:
     def encode_query(self, text: str) -> numpy.ndarray:
         return self._text_to_vec(text)
 
-    def _text_to_vec(self, text: str) -> numpy.ndarray:
-        rng = numpy.random.RandomState(hash(text) % (2**31))
+    def _word_to_vec(self, word: str) -> numpy.ndarray:
+        digest = hashlib.sha256(word.encode("utf-8")).digest()
+        seed = int.from_bytes(digest[:4], "big")
+        rng = numpy.random.RandomState(seed)
         vec = rng.randn(self._dim).astype(numpy.float32)
         return vec / numpy.linalg.norm(vec)
+
+    def _text_to_vec(self, text: str) -> numpy.ndarray:
+        words = text.lower().split() or [""]
+        summed = numpy.sum([self._word_to_vec(w) for w in words], axis=0)
+        norm = numpy.linalg.norm(summed)
+        if norm == 0:
+            return summed.astype(numpy.float32)
+        return (summed / norm).astype(numpy.float32)
 
 
 # -- helpers ----------------------------------------------------------------
