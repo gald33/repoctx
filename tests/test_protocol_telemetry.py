@@ -16,6 +16,7 @@ def _get_tool(server, name: str):
 
 
 def test_protocol_op_event_is_written(tmp_path: Path) -> None:
+    (tmp_path / ".git").mkdir()
     (tmp_path / "AGENTS.md").write_text("# Agents\n")
     telemetry_dir = tmp_path / ".telemetry"
 
@@ -38,6 +39,7 @@ def test_protocol_op_event_is_written(tmp_path: Path) -> None:
 
 
 def test_protocol_op_event_records_failure(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / ".git").mkdir()
     telemetry_dir = tmp_path / ".telemetry"
     server = create_server(repo_root=tmp_path, telemetry_dir=telemetry_dir)
 
