@@ -6,3 +6,4 @@ __pycache__/
 .repoctx/
 build/
 dist/
+uv.lock
