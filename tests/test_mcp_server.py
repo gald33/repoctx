@@ -160,6 +160,136 @@ def test_resolve_repo_root_errors_outside_git(tmp_path: Path, monkeypatch) -> No
     assert "--repo" in msg and "REPOCTX_REPO_ROOT" in msg
 
 
+def _isolate_resolution(monkeypatch, cache_dir: Path) -> None:
+    """Strip env signals and isolate the cache so resolver tests are hermetic."""
+    for var in (
+        "REPOCTX_REPO_ROOT",
+        "CLAUDE_PROJECT_DIR",
+        "WORKSPACE_FOLDER_PATHS",
+        "VSCODE_CWD",
+        "PWD",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("REPOCTX_CACHE_DIR", str(cache_dir))
+
+
+def test_resolve_repo_root_uses_pwd_when_cwd_is_root(tmp_path: Path, monkeypatch) -> None:
+    repo = _make_git_repo(tmp_path / "from_pwd")
+    cache_dir = tmp_path / "cache"
+    _isolate_resolution(monkeypatch, cache_dir)
+    monkeypatch.chdir("/")
+    monkeypatch.setenv("PWD", str(repo))
+    assert resolve_repo_root(None) == repo.resolve()
+
+
+def test_resolve_repo_root_does_not_auto_pick_from_recency_log(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Multi-repo safety: a populated recency log must NOT silently resolve."""
+    import json as _json
+
+    repo = _make_git_repo(tmp_path / "recent")
+    cache_dir = tmp_path / "cache"
+    _isolate_resolution(monkeypatch, cache_dir)
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "recent_repos.json").write_text(
+        _json.dumps([{"path": str(repo), "last_used": 1.0}]), encoding="utf-8"
+    )
+    monkeypatch.chdir("/")
+    with pytest.raises(RuntimeError) as exc_info:
+        resolve_repo_root(None)
+    # Error must surface the recent repo so the model knows what to pass.
+    assert str(repo) in str(exc_info.value)
+
+
+def test_resolve_repo_root_persists_recency_on_success(tmp_path: Path, monkeypatch) -> None:
+    import json as _json
+
+    repo = _make_git_repo(tmp_path / "fresh")
+    cache_dir = tmp_path / "cache"
+    _isolate_resolution(monkeypatch, cache_dir)
+    monkeypatch.chdir(repo)
+    resolve_repo_root(None)
+    log = _json.loads((cache_dir / "recent_repos.json").read_text(encoding="utf-8"))
+    assert log[0]["path"] == str(repo.resolve())
+
+
+def test_resolve_repo_root_recency_log_dedupes_and_orders(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import json as _json
+
+    a = _make_git_repo(tmp_path / "a")
+    b = _make_git_repo(tmp_path / "b")
+    cache_dir = tmp_path / "cache"
+    _isolate_resolution(monkeypatch, cache_dir)
+    monkeypatch.chdir(a)
+    resolve_repo_root(None)
+    monkeypatch.chdir(b)
+    resolve_repo_root(None)
+    monkeypatch.chdir(a)
+    resolve_repo_root(None)  # bumps `a` back to the front
+    log = _json.loads((cache_dir / "recent_repos.json").read_text(encoding="utf-8"))
+    paths = [e["path"] for e in log]
+    assert paths == [str(a.resolve()), str(b.resolve())]
+
+
+def test_mcp_server_memoizes_resolved_root_within_process(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """After one successful resolution, subsequent calls reuse it without re-walking."""
+    repo = _make_git_repo(tmp_path / "memoized")
+    write_file(repo / "AGENTS.md", "# Repo guidance\n")
+    cache_dir = tmp_path / "cache"
+    _isolate_resolution(monkeypatch, cache_dir)
+    monkeypatch.chdir("/")  # no live signals — only per-call arg can resolve
+    server = create_server()
+    tool = _get_tool(server, "get_task_context")
+    # First call must pass repo_root explicitly.
+    tool.fn(task="retry", repo_root=str(repo))
+    # Second call omits repo_root; should still succeed via session memo,
+    # despite cwd=/ and no env signals.
+    result = tool.fn(task="retry")
+    assert any(item["path"] == "AGENTS.md" for item in result["relevant_docs"])
+
+
+def test_mcp_server_explicit_repo_root_switches_session_memo(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A per-call repo_root replaces the session memo (model can switch repos)."""
+    repo_a = _make_git_repo(tmp_path / "a")
+    repo_b = _make_git_repo(tmp_path / "b")
+    write_file(repo_a / "ALPHA.md", "# Repo A\n")
+    write_file(repo_b / "BETA.md", "# Repo B\n")
+    cache_dir = tmp_path / "cache"
+    _isolate_resolution(monkeypatch, cache_dir)
+    monkeypatch.chdir("/")
+    server = create_server()
+    tool = _get_tool(server, "get_task_context")
+    # Resolve to A.
+    res_a = tool.fn(task="alpha", repo_root=str(repo_a))
+    assert any(d["path"] == "ALPHA.md" for d in res_a["relevant_docs"])
+    # Switch to B mid-session — explicit override must replace the memo.
+    res_b = tool.fn(task="beta", repo_root=str(repo_b))
+    assert any(d["path"] == "BETA.md" for d in res_b["relevant_docs"])
+    # Now an unspecified call should target B (the new memo), not A.
+    res_b2 = tool.fn(task="beta")
+    assert any(d["path"] == "BETA.md" for d in res_b2["relevant_docs"])
+
+
+def test_mcp_tool_accepts_per_call_repo_root(tmp_path: Path, monkeypatch) -> None:
+    """A tool's repo_root arg overrides server-startup state and env signals."""
+    repo = _make_git_repo(tmp_path / "per_call")
+    write_file(repo / "AGENTS.md", "# Repo guidance\n")
+    cache_dir = tmp_path / "cache"
+    _isolate_resolution(monkeypatch, cache_dir)
+    monkeypatch.chdir("/")  # no other signals — only the per-call arg can resolve
+    server = create_server()  # startup resolution fails; server still boots
+    tool = _get_tool(server, "get_task_context")
+    result = tool.fn(task="retry", repo_root=str(repo))
+    assert any(item["path"] == "AGENTS.md" for item in result["relevant_docs"])
+
+
 def test_mcp_server_ignores_telemetry_write_failures(tmp_repo: Path, monkeypatch) -> None:
     tmp_path = tmp_repo
     write_file(tmp_path / "AGENTS.md", "# Repo guidance\n")

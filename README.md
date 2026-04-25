@@ -275,14 +275,20 @@ Not necessarily.
 
 RepoCtx resolves the repo root in this order:
 
-1. `--repo /path/to/repo` if passed — strongest override.
-2. `REPOCTX_REPO_ROOT` env var — for hosts with weak workspace context.
-3. Host workspace env vars (`CLAUDE_PROJECT_DIR`, `WORKSPACE_FOLDER_PATHS`, `VSCODE_CWD`) if set — lets Cursor / Claude Code / Claude Desktop auto-scope without per-repo config.
-4. `Path.cwd()` — fallback.
+1. Per-call `repo_root` argument on the MCP tool — strongest override; the model can supply it directly. Once set, it is memoized for the lifetime of the MCP server process; subsequent calls may omit it.
+2. `--repo /path/to/repo` flag (CLI / server startup).
+3. `REPOCTX_REPO_ROOT` env var.
+4. Host workspace env vars (`CLAUDE_PROJECT_DIR`, `WORKSPACE_FOLDER_PATHS`, `VSCODE_CWD`) — lets Cursor / Claude Code / Codex auto-scope without per-repo config.
+5. `Path.cwd()` if it is not `/`.
+6. `$PWD` env var — catches shell-launched cases where the host has chdir'd to `/` before exec.
 
-Whatever candidate is chosen is then walked upward to the nearest `.git` entry (both `.git` directories and `.git` files are accepted, so linked worktrees and submodules work). If no git root is found, RepoCtx fails with a message naming both `--repo` and `REPOCTX_REPO_ROOT` so you can self-correct.
+Whatever candidate is chosen is then walked upward to the nearest `.git` entry (both `.git` directories and `.git` files are accepted, so linked worktrees and submodules work). If no git root is found, RepoCtx fails with a message that lists your most recently resolved repos so the agent can pick one and pass it as `repo_root`. RepoCtx never auto-selects from the recency list — that would silently pick the wrong repo when you work across several.
 
 Nested repositories resolve to the **nearest** repo, not the outermost parent.
+
+#### Claude Desktop note
+
+Claude Desktop launches MCP servers via launchd, so the subprocess starts with cwd `/` and no workspace env vars. RepoCtx still boots cleanly; on the first tool call of a session the model needs to supply `repo_root` once (the tool descriptions remind it). After that, the session memo carries it for every subsequent call until you switch repos by passing a different `repo_root` explicitly. Claude Code, Cursor, and Codex don't need this — they already export workspace context.
 
 ### Can I test RepoCtx from the terminal first?
 
