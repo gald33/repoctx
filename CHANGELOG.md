@@ -4,6 +4,37 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 [SemVer](https://semver.org/).
 
+## [0.5.0] — 2026-04-25
+
+Robust repo-root resolution for hosts with no workspace context (Claude
+Desktop) and safe behavior for users who work across multiple repositories.
+
+### Added
+- **Per-call `repo_root` argument** on every MCP tool (`get_task_context`,
+  `bundle`, `authority`, `scope`, `validate_plan`, `risk_report`, `refresh`).
+  The model can supply the absolute repo path directly — the only signal
+  that's reliable when the host hasn't set workspace env vars.
+- **Per-process session memoization**: the first successful resolution in
+  an MCP server is reused for the lifetime of the process, so the model
+  only needs to pass `repo_root` once per Claude Desktop session.
+- **Recency log** at `~/.cache/repoctx/recent_repos.json` (multi-entry,
+  move-to-front, capped at 10). Used purely to suggest repos in the error
+  message when resolution fails — never auto-selected, because in
+  multi-repo workflows "the most recent repo" is the wrong default.
+- **`$PWD` fallback** for shell-launched hosts that chdir'd to `/` before
+  exec while keeping the shell's logical PWD.
+
+### Changed
+- Server now boots cleanly even when launched by Claude Desktop with cwd
+  `/` and no workspace env vars; resolution is deferred to the first tool
+  call. Previously the server crashed at startup with `Server disconnected`.
+- Resolution error messages now list recent repos and instruct the model
+  to pass `repo_root` rather than only `--repo` / `REPOCTX_REPO_ROOT`.
+
+### Removed
+- The single-value `~/.cache/repoctx/last_repo` cache. It silently picked
+  the wrong repo when you switched between projects across hosts.
+
 ## [0.4.0] — 2026-04-24
 
 Introduces the **v2 ground-truth operating layer** for coding agents. The v1
