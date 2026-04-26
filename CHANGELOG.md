@@ -4,6 +4,37 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 [SemVer](https://semver.org/).
 
+## [0.6.0] — 2026-04-26
+
+Four GitNexus-inspired capabilities, all additive — no schema breaks, no
+new dependencies.
+
+### Added
+- **`detect_changes` MCP tool + CLI**: maps changed files to direct +
+  one-hop transitive callers via the existing import graph. Falls back to
+  git's dirty file list when called with no arguments. Surfaces "if I
+  touch X, who else needs review?" in one call.
+- **Staleness markers**: `bundle()`, `scope()`, and `refresh()` now
+  include `staleness` (`head_sha`, `branch`, `dirty_file_count`,
+  `dirty_files`, and `dirty_in_scope` for scope-aware ops). Empty `{}` on
+  non-git directories.
+- **`affected` field on `refresh()`**: same shape as `detect_changes`
+  output, so the agent sees blast radius alongside the new scope.
+- **`install` CLI + MCP tool**: one-shot setup that runs every harness
+  installer (Claude Code, Cursor, Codex) plus the authority scaffold.
+  Mirrors GitNexus's `analyze` UX. Idempotent per step; `--no-scaffold`
+  skips the contracts/architecture/examples skeleton.
+- **`propose_authority` CLI + MCP tool**: scans the repo for subsystems
+  and contract surfaces (FastAPI/Flask/Django/Express routes, Pydantic
+  models, dataclasses, GraphQL schemas, OpenAPI specs, JSON Schema, plus
+  filename hints), then returns a structured `agent_brief` and
+  `suggested_files` checklist so an LLM can author real
+  `contracts/*.md` and `docs/architecture/*.md` instead of staring at
+  empty scaffold templates.
+- **AGENTS.md first-time-setup block**: new installs now include
+  guidance telling agents to call `propose_authority` when only the
+  scaffold is present, closing the bootstrap loop.
+
 ## [0.5.1] — 2026-04-26
 
 ### Changed
