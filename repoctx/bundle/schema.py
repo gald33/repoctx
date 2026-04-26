@@ -94,6 +94,7 @@ class GroundTruthBundle:
     before_finalize_checklist: list[str] = field(default_factory=list)
     uncertainty_rule: str = ""
     metrics: dict[str, Any] = field(default_factory=dict)
+    staleness: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self, *, include_full_text: bool = False) -> dict[str, Any]:
         def _auth_to_dict(r: AuthorityRecord) -> dict[str, Any]:
@@ -125,4 +126,5 @@ class GroundTruthBundle:
             "before_finalize_checklist": list(self.before_finalize_checklist),
             "uncertainty_rule": self.uncertainty_rule,
             "metrics": dict(self.metrics),
+            "staleness": dict(self.staleness),
         }

@@ -23,6 +23,7 @@ from repoctx.bundle.schema import (
     ValidationPlan,
 )
 from repoctx.config import DEFAULT_CONFIG, RepoCtxConfig
+from repoctx.git_state import collect_state
 from repoctx.models import RankedPath
 from repoctx.retriever import get_task_context
 
@@ -89,6 +90,8 @@ def build_bundle(
         "relevant_code": len(relevant_code),
         "build_duration_ms": int((perf_counter() - started) * 1000),
     }
+    scope_paths = list(edit_scope.allowed_paths) + list(edit_scope.related_paths) + list(edit_scope.protected_paths)
+    bundle.staleness = collect_state(repo_path, scope_paths=scope_paths)
     return bundle
 
 

@@ -15,4 +15,5 @@ def op_scope(task: str, repo_root: str | Path = ".") -> dict[str, Any]:
         "task": {"summary": bundle.task_summary, "raw": bundle.task_raw},
         "edit_scope": bundle.edit_scope.to_dict(),
         "when_to_recall_repoctx": list(bundle.when_to_recall_repoctx),
+        "staleness": dict(bundle.staleness),
     }

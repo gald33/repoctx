@@ -342,6 +342,7 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
     from repoctx.protocol import (
         op_authority,
         op_bundle,
+        op_detect_changes,
         op_refresh,
         op_risk_report,
         op_scope,
@@ -468,6 +469,63 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
             lambda: op_refresh(task, changed_files, current_scope, repo_root=root),
         )
     _register("Recompute scope/authority after the change set has shifted.", refresh)
+
+    def install(
+        repo_root: str | None = None,
+        scaffold_authority: bool = True,
+    ) -> dict[str, object]:
+        from repoctx.harness import install_all
+
+        root = _resolve(repo_root)
+        return _run_op(
+            "install",
+            "",
+            root,
+            lambda: install_all(repo_root=root, scaffold_authority=scaffold_authority),
+        )
+    _register(
+        "Install repoctx into a repo: writes AGENTS.md section + MCP config "
+        "for Claude Code / Cursor / Codex, and (by default) scaffolds the "
+        "contracts/docs/examples authority layout. Idempotent.",
+        install,
+    )
+
+    def propose_authority(repo_root: str | None = None) -> dict[str, object]:
+        from repoctx.authority.propose import propose_authority as _propose
+
+        root = _resolve(repo_root)
+        return _run_op(
+            "propose_authority",
+            "",
+            root,
+            lambda: _propose(repo_root=root),
+        )
+    _register(
+        "Generate a brief telling YOU (the agent) which contracts and "
+        "architecture notes to write for this repo, with detected subsystems, "
+        "contract surfaces, and a concrete file checklist. Use the returned "
+        "`agent_brief` plus `suggested_files` to author the authority layout "
+        "via your Write tool. Run after `install`, before the user's first task.",
+        propose_authority,
+    )
+
+    def detect_changes(
+        changed_files: list[str] | None = None,
+        repo_root: str | None = None,
+    ) -> dict[str, object]:
+        root = _resolve(repo_root)
+        files = list(changed_files or [])
+        return _run_op(
+            "detect_changes",
+            "",
+            root,
+            lambda: op_detect_changes(files, repo_root=root),
+        )
+    _register(
+        "Map changed files to their direct + transitive callers via the import graph. "
+        "Defaults to git's dirty file list when changed_files is empty.",
+        detect_changes,
+    )
 
     return server
 
