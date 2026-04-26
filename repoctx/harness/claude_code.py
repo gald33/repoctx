@@ -27,6 +27,14 @@ AGENTS_SECTION_BODY = """For any non-trivial task in this repo:
 4. If unsure whether a change violates a constraint, call `repoctx.authority(task)` — do not guess.
 
 Every repoctx response includes `when_to_recall_repoctx` and `before_finalize_checklist`. Follow them.
+
+### First-time setup (one-shot)
+
+If `contracts/` and `docs/architecture/` only contain the scaffold (`README.md` + `example.md`), repoctx has no real ground truth to surface. Bootstrap it once:
+
+1. Call `repoctx.propose_authority()`. It returns `agent_brief` (markdown instructions), `suggested_files` (concrete paths to write), and detected `subsystems` + `contract_candidates`.
+2. Author each file in `suggested_files` using the `agent_brief` conventions. Read 2–3 sample files per subsystem first — describe what *is* true, not what *should* be true.
+3. Re-run `repoctx.bundle("sanity check")` to confirm the new authority loads.
 """
 
 MCP_SERVER_NAME = "repoctx"

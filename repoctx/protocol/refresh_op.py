@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from repoctx.bundle import build_bundle
+from repoctx.protocol.changes_op import op_detect_changes
 
 
 def op_refresh(
@@ -16,6 +17,7 @@ def op_refresh(
 ) -> dict[str, Any]:
     bundle = build_bundle(task, repo_root=repo_root)
     new_scope = bundle.edit_scope.to_dict()
+    changes = op_detect_changes(changed_files, repo_root=repo_root) if changed_files else None
 
     def _diff(key: str) -> list[str]:
         old = set((current_scope or {}).get(key, []))
@@ -36,5 +38,7 @@ def op_refresh(
             {"id": r.id, "type": r.type, "title": r.title, "authority_level": int(r.authority_level)}
             for r in bundle.authoritative_records
         ],
+        "affected": (changes or {}).get("affected", []),
+        "staleness": dict(bundle.staleness),
         "when_to_recall_repoctx": list(bundle.when_to_recall_repoctx),
     }

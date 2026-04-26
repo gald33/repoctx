@@ -43,10 +43,13 @@ SUBCOMMANDS = {
     "validate-plan",
     "risk-report",
     "refresh",
+    "detect-changes",
+    "install",
     "install-claude-code",
     "install-cursor",
     "install-codex",
     "init-authority",
+    "propose-authority",
 }
 EXPERIMENT_SUBCOMMANDS = {"start", "lane", "summarize"}
 HELP_USAGE = """repoctx [-h] TASK
@@ -192,6 +195,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="JSON for current edit scope (keys: allowed_paths, related_paths, protected_paths)",
     )
 
+    dc = sub.add_parser(
+        "detect-changes",
+        help="Map changed files to direct + transitive callers via the import graph",
+    )
+    dc.add_argument("--repo", default=".", help="Repository root")
+    dc.add_argument(
+        "--changed",
+        nargs="*",
+        default=[],
+        help="Changed file paths (defaults to git's dirty file list)",
+    )
+
+    ia_all = sub.add_parser(
+        "install",
+        help="One-shot setup: install all harness adapters + scaffold authority layout",
+    )
+    ia_all.add_argument("--repo", default=".", help="Repository root")
+    ia_all.add_argument(
+        "--no-scaffold",
+        action="store_true",
+        help="Skip the contracts/docs/examples scaffold (just register MCP entries)",
+    )
+
     ic = sub.add_parser(
         "install-claude-code",
         help="Install AGENTS.md section + .mcp.json entry for repoctx (v2)",
@@ -215,6 +241,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Scaffold contracts/ + docs/architecture/ + examples/ starter layout (v2)",
     )
     ia.add_argument("--repo", default=".", help="Repository root")
+
+    pa = sub.add_parser(
+        "propose-authority",
+        help="Generate a brief that lets an LLM author the authority files itself",
+    )
+    pa.add_argument("--repo", default=".", help="Repository root")
+    pa.add_argument(
+        "--brief-only",
+        action="store_true",
+        help="Print only the markdown brief (skip the JSON envelope)",
+    )
 
     return parser
 
@@ -249,6 +286,10 @@ def main() -> None:
         _cmd_risk_report(args)
     elif cmd == "refresh":
         _cmd_refresh(args)
+    elif cmd == "detect-changes":
+        _cmd_detect_changes(args)
+    elif cmd == "install":
+        _cmd_install_all(args)
     elif cmd == "install-claude-code":
         _cmd_install_claude_code(args)
     elif cmd == "install-cursor":
@@ -257,6 +298,8 @@ def main() -> None:
         _cmd_install_codex(args)
     elif cmd == "init-authority":
         _cmd_init_authority(args)
+    elif cmd == "propose-authority":
+        _cmd_propose_authority(args)
     else:
         parser.print_help()
         raise SystemExit(1)
@@ -312,6 +355,19 @@ def _cmd_refresh(args: argparse.Namespace) -> None:
     )
 
 
+def _cmd_detect_changes(args: argparse.Namespace) -> None:
+    from repoctx.protocol import op_detect_changes
+
+    print(json.dumps(op_detect_changes(args.changed, repo_root=args.repo), indent=2))
+
+
+def _cmd_install_all(args: argparse.Namespace) -> None:
+    from repoctx.harness import install_all
+
+    result = install_all(repo_root=args.repo, scaffold_authority=not args.no_scaffold)
+    print(json.dumps(result, indent=2))
+
+
 def _cmd_install_claude_code(args: argparse.Namespace) -> None:
     from repoctx.harness import install_claude_code
 
@@ -338,6 +394,16 @@ def _cmd_init_authority(args: argparse.Namespace) -> None:
 
     result = init_authority(repo_root=args.repo)
     print(json.dumps(result.to_dict(), indent=2))
+
+
+def _cmd_propose_authority(args: argparse.Namespace) -> None:
+    from repoctx.authority.propose import propose_authority
+
+    result = propose_authority(repo_root=args.repo)
+    if args.brief_only:
+        print(result["agent_brief"])
+        return
+    print(json.dumps(result, indent=2))
 
 
 def _ensure_default_subcommand() -> None:
