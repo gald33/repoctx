@@ -4,6 +4,16 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 [SemVer](https://semver.org/).
 
+## [0.5.1] — 2026-04-26
+
+### Changed
+- When the recency log filters down to **exactly one live entry**, the
+  resolver now auto-picks it. Single-repo users get zero-friction first
+  calls on launchd-spawned hosts (Claude Desktop) without needing to pass
+  `repo_root`. Multi-repo users still see the error and pick — the
+  multi-repo bug is not reintroduced because >1 live entry continues to
+  refuse auto-selection.
+
 ## [0.5.0] — 2026-04-25
 
 Robust repo-root resolution for hosts with no workspace context (Claude

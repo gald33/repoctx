@@ -182,24 +182,75 @@ def test_resolve_repo_root_uses_pwd_when_cwd_is_root(tmp_path: Path, monkeypatch
     assert resolve_repo_root(None) == repo.resolve()
 
 
-def test_resolve_repo_root_does_not_auto_pick_from_recency_log(
+def test_resolve_repo_root_does_not_auto_pick_when_multiple_recent(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Multi-repo safety: a populated recency log must NOT silently resolve."""
+    """Multi-repo safety: a recency log with >1 live entry must NOT auto-pick."""
     import json as _json
 
-    repo = _make_git_repo(tmp_path / "recent")
+    repo_a = _make_git_repo(tmp_path / "alpha")
+    repo_b = _make_git_repo(tmp_path / "beta")
     cache_dir = tmp_path / "cache"
     _isolate_resolution(monkeypatch, cache_dir)
     cache_dir.mkdir(parents=True)
     (cache_dir / "recent_repos.json").write_text(
-        _json.dumps([{"path": str(repo), "last_used": 1.0}]), encoding="utf-8"
+        _json.dumps(
+            [
+                {"path": str(repo_a), "last_used": 2.0},
+                {"path": str(repo_b), "last_used": 1.0},
+            ]
+        ),
+        encoding="utf-8",
     )
     monkeypatch.chdir("/")
     with pytest.raises(RuntimeError) as exc_info:
         resolve_repo_root(None)
-    # Error must surface the recent repo so the model knows what to pass.
-    assert str(repo) in str(exc_info.value)
+    # Error must list both candidates so the model can pick.
+    msg = str(exc_info.value)
+    assert str(repo_a) in msg and str(repo_b) in msg
+
+
+def test_resolve_repo_root_auto_picks_sole_recent_entry(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Single-repo convenience: if the recency log has exactly one live entry,
+    auto-pick it so single-repo users see zero friction on launchd-spawned hosts."""
+    import json as _json
+
+    repo = _make_git_repo(tmp_path / "only")
+    cache_dir = tmp_path / "cache"
+    _isolate_resolution(monkeypatch, cache_dir)
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "recent_repos.json").write_text(
+        _json.dumps([{"path": str(repo), "last_used": 1.0}]),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir("/")
+    assert resolve_repo_root(None) == repo.resolve()
+
+
+def test_resolve_repo_root_skips_dead_recent_entries_for_auto_pick(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A recency log with one live + many dead entries must still auto-pick the live one."""
+    import json as _json
+
+    live = _make_git_repo(tmp_path / "live")
+    cache_dir = tmp_path / "cache"
+    _isolate_resolution(monkeypatch, cache_dir)
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "recent_repos.json").write_text(
+        _json.dumps(
+            [
+                {"path": str(tmp_path / "vanished_a"), "last_used": 3.0},
+                {"path": str(live), "last_used": 2.0},
+                {"path": str(tmp_path / "vanished_b"), "last_used": 1.0},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir("/")
+    assert resolve_repo_root(None) == live.resolve()
 
 
 def test_resolve_repo_root_persists_recency_on_success(tmp_path: Path, monkeypatch) -> None:

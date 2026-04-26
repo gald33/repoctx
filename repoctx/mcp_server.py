@@ -163,9 +163,7 @@ def _pick_candidate(explicit: str | Path | None) -> tuple[Path, str]:
         return Path(explicit), "explicit"
     cwd = Path.cwd()
     # Treat "/" as no signal — it's almost certainly a launchd-spawned host
-    # with no workspace context. Try $PWD as a last live-signal attempt; if
-    # it's also missing, fall through to the error path so the model is told
-    # to pass repo_root rather than silently picking the wrong repo.
+    # with no workspace context. Try $PWD as a last live-signal attempt.
     if str(cwd) != "/":
         return cwd, "cwd"
     pwd = os.environ.get("PWD", "").strip()
@@ -173,6 +171,14 @@ def _pick_candidate(explicit: str | Path | None) -> tuple[Path, str]:
         pwd_path = Path(pwd)
         if pwd_path.is_absolute() and pwd_path.exists():
             return pwd_path, "$PWD"
+    # No live signal at all. If the recency log has exactly one live entry,
+    # auto-pick it — single-repo users get zero friction. Multi-repo users
+    # have >1 live entry and fall through to the error path, where they're
+    # asked to pick. The "live" filter (.git still exists) protects against
+    # stale entries.
+    recent = _read_recent_repos()
+    if len(recent) == 1:
+        return recent[0], "recent (sole entry)"
     return cwd, "cwd"
 
 
