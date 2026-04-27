@@ -4,7 +4,9 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [1.0.1] — 2026-04-27
+
+Patch release. One-command first-time setup; reliable indexing on Apple silicon.
 
 ### Changed
 - **`repoctx install` now auto-builds the embedding index** when the
