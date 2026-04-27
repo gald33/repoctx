@@ -13,6 +13,24 @@ All notable changes to `repoctx` are documented here. Format loosely follows
   a build (errors if extras are missing). The install summary JSON gains an
   `installed.embedding_index` entry reporting `built` / `skipped` status.
 
+### Fixed
+- **Apple silicon MPS OOM during `repoctx index`** is now handled
+  automatically. Chunk-aware embedding produces ~5× more rows per file than
+  the previous whole-file approach, exposing a latent issue where
+  `sentence-transformers` auto-selected MPS and tried to allocate a Metal
+  buffer larger than physical memory.
+  - **Auto-clamp**: when the resolved device is MPS, `batch_size` is
+    capped at 8 (overridable via `REPOCTX_EMBEDDING_BATCH_SIZE`), reducing
+    Metal allocator pressure substantially.
+  - **Auto-fallback**: when encoding raises a `RuntimeError` (typical for
+    catchable OOM), the model is moved to CPU and the encode is retried
+    transparently. The query path falls back the same way.
+  - **Manual override** for the rare uncatchable C++ assert path:
+    `REPOCTX_EMBEDDING_DEVICE=cpu repoctx index`.
+
+  `EmbeddingConfig` gains explicit `device` and `batch_size` fields
+  (defaults: auto-detect / 16) for users who want to pin behavior.
+
 ## [1.0.0] — 2026-04-27
 
 First stable release. Embedding retrieval is now chunk-aware.
