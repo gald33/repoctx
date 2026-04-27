@@ -232,12 +232,20 @@ repoctx bundle "refactor session-token storage" --format markdown
 ### Install for your agent harness
 
 ```bash
+repoctx install                 # runs every harness installer + scaffolds authority layout
+```
+
+Or run individually if you only target one harness:
+
+```bash
 repoctx install-claude-code     # writes AGENTS.md section + .mcp.json
 repoctx install-cursor          # writes AGENTS.md section + .cursor/mcp.json
 repoctx install-codex           # writes AGENTS.md section + .codex/mcp.json
 ```
 
-All installers are idempotent; existing AGENTS.md content and other MCP servers are preserved.
+All installers are idempotent; existing AGENTS.md content and other MCP servers are preserved. Pass `--no-scaffold` to `repoctx install` to skip the contracts/docs/examples scaffold.
+
+> **Note:** `repoctx install` does **not** build the embedding index. That's a separate step — see [Embedding-Based Retrieval](#embedding-based-retrieval-v2) below — because the embedding deps are an optional extra and the model download is ~1.2 GB.
 
 ### Repo conventions
 
@@ -351,19 +359,33 @@ The model weights (~1.2 GB) are downloaded automatically on first use.
 
 ### Build the embedding index
 
+Run from inside the repo (no `--repo` flag needed):
+
 ```bash
-repoctx index --repo /path/to/repo
+cd /path/to/repo
+repoctx index
 ```
 
-This scans the repository, splits each file into overlapping chunks (symbol-
-aware for code: function/class/method boundaries; paragraph-aware for prose),
-embeds each chunk with metadata (`file:`, `kind:`, `module:`, `symbol:`,
-`lines:`), and writes the index to `.repoctx/embeddings/`. Add `.repoctx/` to
-your `.gitignore`.
+`--repo /path/to/repo` is only required when invoking from outside the repo directory.
 
-> **Upgrading from v1 indexes**: the on-disk format changed (`schema_version: 2`).
-> Old indexes raise `IndexSchemaMismatch` on load. Delete `.repoctx/embeddings/`
-> and re-run `repoctx index` once after upgrading.
+The index command scans the repository, splits each file into overlapping chunks (symbol-aware for code — function/class/method boundaries; paragraph-aware for prose), embeds each chunk with metadata (`file:`, `kind:`, `module:`, `symbol:`, `lines:`), and writes the index to `.repoctx/embeddings/`. Add `.repoctx/` to your `.gitignore`.
+
+> **Upgrading from a v1 index**: the on-disk format changed in 1.0.0 (`schema_version: 2`). Old indexes raise `IndexSchemaMismatch` on load. Delete `.repoctx/embeddings/` and re-run `repoctx index` once after upgrading.
+
+### End-to-end first-time setup
+
+```bash
+pip install "repoctx-mcp[embeddings]"
+cd /path/to/your/repo
+repoctx install     # MCP wiring for Claude Code / Cursor / Codex + authority scaffold
+repoctx index       # build the chunk-aware embedding index
+```
+
+After that, your agent gets context automatically through MCP. To query from the terminal:
+
+```bash
+repoctx "refactor the payment retry policy"
+```
 
 ### Query with hybrid retrieval
 
