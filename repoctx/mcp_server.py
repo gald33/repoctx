@@ -490,6 +490,26 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
         install,
     )
 
+    def stats(
+        days: int = 30,
+        repo_root: str | None = None,
+    ) -> dict[str, object]:
+        from repoctx.stats import compute_stats
+        from repoctx.telemetry import sha256_hex
+
+        repo_hash = None
+        if repo_root:
+            repo_hash = sha256_hex(str(Path(repo_root).resolve()))
+        window = None if days == 0 else days
+        return compute_stats(days=window, repo_hash=repo_hash)
+    _register(
+        "Aggregate repoctx telemetry: per-op counts, success rate, p50/p95 "
+        "latency, daily activity, recent errors. `days=0` means all time. "
+        "Pass `repo_root` to scope to a single repo. Read-only — does not "
+        "scan the repo.",
+        stats,
+    )
+
     def propose_authority(repo_root: str | None = None) -> dict[str, object]:
         from repoctx.authority.propose import propose_authority as _propose
 
