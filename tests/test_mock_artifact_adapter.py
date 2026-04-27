@@ -8,6 +8,8 @@ metadata filtering and cross-namespace support.
 
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
 numpy = pytest.importorskip("numpy")
@@ -37,8 +39,9 @@ class FakeProvider:
         return self._vec(text)
 
     def _vec(self, text: str) -> numpy.ndarray:
-        rng = numpy.random.RandomState(hash(text) % (2**31))
-        v = rng.randn(self._dim).astype(numpy.float32)
+        seed = int(hashlib.sha256(text.encode("utf-8")).hexdigest()[:8], 16)
+        rng = numpy.random.RandomState(seed)
+        v = rng.rand(self._dim).astype(numpy.float32)
         return v / numpy.linalg.norm(v)
 
 

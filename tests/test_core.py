@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -37,8 +38,9 @@ class FakeProvider:
         return self._text_to_vec(text)
 
     def _text_to_vec(self, text: str) -> numpy.ndarray:
-        rng = numpy.random.RandomState(hash(text) % (2**31))
-        vec = rng.randn(self._dim).astype(numpy.float32)
+        seed = int(hashlib.sha256(text.encode("utf-8")).hexdigest()[:8], 16)
+        rng = numpy.random.RandomState(seed)
+        vec = rng.rand(self._dim).astype(numpy.float32)
         return vec / numpy.linalg.norm(vec)
 
 
