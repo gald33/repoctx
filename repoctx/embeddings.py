@@ -12,8 +12,10 @@ from pathlib import Path, PurePosixPath
 from time import perf_counter
 from typing import TYPE_CHECKING
 
+from repoctx.chunker import Chunk, ChunkConfig, chunk_record
 from repoctx.config import DEFAULT_EMBEDDING_CONFIG, EmbeddingConfig
 from repoctx.models import FileRecord
+from repoctx.symbols import extract_symbols
 
 if TYPE_CHECKING:
     import numpy as np
@@ -49,6 +51,26 @@ def build_enriched_text(record: FileRecord, max_content_chars: int = 8000) -> st
 
     content = record.content[:max_content_chars] if record.content else ""
     lines.append(content)
+    return "\n".join(lines)
+
+
+def build_enriched_chunk_text(record: FileRecord, chunk: Chunk) -> str:
+    """Per-chunk enriched text: file/kind/module/symbol/lines header + chunk body.
+
+    Mirrors :func:`build_enriched_text` but adds symbol and line-range hints so
+    the embedding captures *which part* of the file we're representing.
+    """
+    parts = PurePosixPath(record.path).parts
+    module = "/".join(parts[:-1]) if len(parts) > 1 else ""
+
+    lines = [f"file: {record.path}", f"kind: {record.kind}"]
+    if module:
+        lines.append(f"module: {module}")
+    if chunk.enclosing_symbol:
+        lines.append(f"symbol: {chunk.enclosing_symbol}")
+    lines.append(f"lines: {chunk.start_line}-{chunk.end_line}")
+    lines.append("")
+    lines.append(chunk.text)
     return "\n".join(lines)
 
 
@@ -119,37 +141,73 @@ def try_load_retriever(
         return None
 
 
+def _chunks_for_record(
+    record: FileRecord, chunk_cfg: ChunkConfig
+) -> list[Chunk]:
+    """Extract symbols (if applicable) and chunk *record* accordingly."""
+    symbols = extract_symbols(record) if record.kind in {"code", "test", "config"} else []
+    return chunk_record(record, symbols=symbols, cfg=chunk_cfg)
+
+
+def _chunk_to_entry(record: FileRecord, chunk: Chunk):
+    """Build an IndexEntry for *chunk* of *record*. Imported lazily."""
+    from repoctx.vector_index import IndexEntry
+
+    return IndexEntry(
+        path=record.path,
+        kind=record.kind,
+        content_hash=content_hash(chunk.text),
+        record_type="chunk",
+        metadata={
+            "chunk_index": chunk.chunk_index,
+            "start_line": chunk.start_line,
+            "end_line": chunk.end_line,
+            "enclosing_symbol": chunk.enclosing_symbol,
+        },
+    )
+
+
 def build_index(
     repo_root: str | Path,
     config: EmbeddingConfig = DEFAULT_EMBEDDING_CONFIG,
+    chunk_config: ChunkConfig | None = None,
 ) -> VectorIndex:
-    """Scan a repository, embed every file, and return a VectorIndex.
+    """Scan a repository, chunk every file, embed each chunk, and return a VectorIndex.
 
-    Caller is responsible for persisting the index with ``index.save(…)``.
+    Each file produces one or more chunks (symbol-aware sliding window for code,
+    paragraph-aware for prose). Caller persists with ``index.save(…)``.
     """
     from repoctx.scanner import scan_repository
     from repoctx.vector_index import VectorIndex
 
+    chunk_cfg = chunk_config or ChunkConfig()
     root = Path(repo_root).resolve()
     repo_index = scan_repository(root)
     model = EmbeddingModel(config)
 
     records: list[FileRecord] = list(repo_index.records.values())
-    texts = [build_enriched_text(r, config.max_content_chars) for r in records]
-    hashes = [content_hash(r.content) for r in records]
+    texts: list[str] = []
+    entries_proto: list[tuple[FileRecord, Chunk]] = []
+    skipped_empty = 0
+    for record in records:
+        chunks = _chunks_for_record(record, chunk_cfg)
+        if not chunks:
+            skipped_empty += 1
+            continue
+        for chunk in chunks:
+            texts.append(build_enriched_chunk_text(record, chunk))
+            entries_proto.append((record, chunk))
 
-    logger.info("Embedding %d files …", len(texts))
+    logger.info(
+        "Embedding %d chunks across %d files (%d empty skipped) …",
+        len(texts), len(records) - skipped_empty, skipped_empty,
+    )
     started = perf_counter()
     vectors = model.encode_documents(texts)
     elapsed = perf_counter() - started
-    logger.info("Embedded %d files in %.1f s", len(texts), elapsed)
+    logger.info("Embedded %d chunks in %.1f s", len(texts), elapsed)
 
-    from repoctx.vector_index import IndexEntry
-
-    entries = [
-        IndexEntry(path=r.path, kind=r.kind, content_hash=h)
-        for r, h in zip(records, hashes)
-    ]
+    entries = [_chunk_to_entry(record, chunk) for record, chunk in entries_proto]
     return VectorIndex(
         vectors=vectors,
         entries=entries,
@@ -162,11 +220,13 @@ def update_file_in_index(
     file_path: str,
     repo_root: str | Path,
     config: EmbeddingConfig = DEFAULT_EMBEDDING_CONFIG,
+    chunk_config: ChunkConfig | None = None,
 ) -> None:
-    """Re-embed a single file and update the persisted index on disk."""
+    """Re-chunk and re-embed a single file, replacing all of its rows on disk."""
     from repoctx.scanner import scan_repository
     from repoctx.vector_index import VectorIndex
 
+    chunk_cfg = chunk_config or ChunkConfig()
     root = Path(repo_root).resolve()
     index_dir = root / config.index_dir / "embeddings"
     vec_index = VectorIndex.load(index_dir)
@@ -181,9 +241,18 @@ def update_file_in_index(
     if record is None:
         raise FileNotFoundError(f"File not found in repository index: {file_path}")
 
-    text = build_enriched_text(record, config.max_content_chars)
-    vector = model.encode_documents([text], show_progress=False)[0]
-    chash = content_hash(record.content)
-    vec_index.update_entry(rel_path, record.kind, chash, vector)
+    chunks = _chunks_for_record(record, chunk_cfg)
+    removed = vec_index.delete_by_path(rel_path)
+    if not chunks:
+        vec_index.save(index_dir)
+        logger.info("Removed %d stale chunks for empty %s", removed, rel_path)
+        return
+
+    texts = [build_enriched_chunk_text(record, c) for c in chunks]
+    vectors = model.encode_documents(texts, show_progress=False)
+    entries = [_chunk_to_entry(record, c) for c in chunks]
+    vec_index.add_entries(entries, vectors)
     vec_index.save(index_dir)
-    logger.info("Updated embedding for %s", rel_path)
+    logger.info(
+        "Updated %s: replaced %d chunks with %d new", rel_path, removed, len(chunks),
+    )

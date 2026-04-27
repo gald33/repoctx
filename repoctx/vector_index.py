@@ -26,6 +26,15 @@ VECTORS_FILE = "vectors.npy"
 METADATA_FILE = "metadata.json"
 INDEX_CONFIG_FILE = "index_config.json"
 
+# Bump when the on-disk format or per-entry semantics change in a way that
+# requires re-embedding. Loading an index without this field, or with a value
+# below SCHEMA_VERSION, raises IndexSchemaMismatch — callers must rebuild.
+SCHEMA_VERSION = 2
+
+
+class IndexSchemaMismatch(RuntimeError):
+    """Raised when an on-disk index is older than SCHEMA_VERSION."""
+
 
 @dataclass(slots=True)
 class IndexEntry:
@@ -53,17 +62,22 @@ class VectorIndex:
         return len(self.entries)
 
     def similarity_scores(self, query_vector: Any) -> dict[str, float]:
-        """Cosine similarity of *query_vector* against every stored vector.
+        """Cosine similarity of *query_vector*, aggregated to ``{path: max_score}``.
 
-        Returns ``{path: similarity}`` for backward compatibility.
+        Multiple chunks per file collapse via max-pool: a file's score is its
+        best-matching chunk. Use :meth:`similarity_scores_by_id` for per-chunk
+        results.
         """
         if not HAS_NUMPY or self.vectors is None or len(self.entries) == 0:
             return {}
         scores = self.vectors @ query_vector
-        return {
-            entry.path: float(scores[i])
-            for i, entry in enumerate(self.entries)
-        }
+        out: dict[str, float] = {}
+        for i, entry in enumerate(self.entries):
+            s = float(scores[i])
+            prev = out.get(entry.path)
+            if prev is None or s > prev:
+                out[entry.path] = s
+        return out
 
     def similarity_scores_by_id(
         self,
@@ -125,6 +139,7 @@ class VectorIndex:
         (d / METADATA_FILE).write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
         config: dict[str, Any] = {
+            "schema_version": SCHEMA_VERSION,
             "model_name": self.model_name,
             "dimension": self.dimension,
             "file_count": len(self.entries),
@@ -148,6 +163,13 @@ class VectorIndex:
         vectors = _np.load(d / VECTORS_FILE)
         metadata = json.loads((d / METADATA_FILE).read_text(encoding="utf-8"))
         config = json.loads((d / INDEX_CONFIG_FILE).read_text(encoding="utf-8"))
+
+        version = config.get("schema_version", 1)
+        if version != SCHEMA_VERSION:
+            raise IndexSchemaMismatch(
+                f"Vector index at {d} is schema v{version}; this build expects "
+                f"v{SCHEMA_VERSION}. Rebuild with `repoctx refresh --rebuild-index`."
+            )
 
         entries = [
             IndexEntry(
@@ -204,3 +226,39 @@ class VectorIndex:
             self.vectors = vec2d
         else:
             self.vectors = _np.vstack([self.vectors, vec2d])
+
+    # ---- bulk multi-chunk mutation ------------------------------------------
+
+    def delete_by_path(self, path: str) -> int:
+        """Remove every entry whose ``path`` equals *path*. Returns count removed."""
+        if not HAS_NUMPY or not self.entries:
+            return 0
+        keep_mask = _np.array(
+            [e.path != path for e in self.entries], dtype=bool
+        )
+        removed = len(self.entries) - int(keep_mask.sum())
+        if removed == 0:
+            return 0
+        self.entries = [e for e, k in zip(self.entries, keep_mask) if k]
+        if self.vectors is not None:
+            self.vectors = self.vectors[keep_mask]
+        return removed
+
+    def add_entries(self, entries: list[IndexEntry], vectors: Any) -> None:
+        """Append *entries* with their *vectors* (shape ``(N, dim)``)."""
+        if not HAS_NUMPY:
+            raise ImportError("numpy is required")
+        if not entries:
+            return
+        vec_arr = _np.asarray(vectors)
+        if vec_arr.ndim == 1:
+            vec_arr = vec_arr.reshape(1, -1)
+        if vec_arr.shape[0] != len(entries):
+            raise ValueError(
+                f"add_entries: got {len(entries)} entries but {vec_arr.shape[0]} vectors"
+            )
+        self.entries.extend(entries)
+        if self.vectors is None or self.vectors.shape[0] == 0:
+            self.vectors = vec_arr
+        else:
+            self.vectors = _np.vstack([self.vectors, vec_arr])

@@ -9,7 +9,12 @@ import pytest
 
 numpy = pytest.importorskip("numpy")
 
-from repoctx.vector_index import IndexEntry, VectorIndex
+from repoctx.vector_index import (
+    IndexEntry,
+    IndexSchemaMismatch,
+    SCHEMA_VERSION,
+    VectorIndex,
+)
 
 
 def _normalise(v):
@@ -110,3 +115,154 @@ def test_update_on_empty_index() -> None:
     vec = numpy.array([1.0, 0.0, 0.0, 0.0], dtype=numpy.float32)
     idx.update_entry("first.py", "code", "h", vec)
     assert len(idx) == 1
+
+
+# -- chunk-aware multi-row API -------------------------------------------------
+
+
+def _multi_chunk_index() -> VectorIndex:
+    """Index with two chunks for file_a.py and one for file_b.py."""
+    vecs = numpy.array(
+        [
+            [1.0, 0.0, 0.0, 0.0],  # file_a chunk 0
+            [0.7, 0.7, 0.0, 0.0],  # file_a chunk 1 (different direction)
+            [0.0, 0.0, 1.0, 0.0],  # file_b chunk 0
+        ],
+        dtype=numpy.float32,
+    )
+    # Normalise rows so dot product == cosine similarity.
+    vecs /= numpy.linalg.norm(vecs, axis=1, keepdims=True)
+    entries = [
+        IndexEntry(
+            path="file_a.py", kind="code", content_hash="h0",
+            metadata={"chunk_index": 0, "start_line": 1, "end_line": 10},
+        ),
+        IndexEntry(
+            path="file_a.py", kind="code", content_hash="h1",
+            metadata={"chunk_index": 1, "start_line": 11, "end_line": 20},
+        ),
+        IndexEntry(
+            path="file_b.py", kind="code", content_hash="h2",
+            metadata={"chunk_index": 0, "start_line": 1, "end_line": 5},
+        ),
+    ]
+    return VectorIndex(vectors=vecs, entries=entries, model_name="test", dimension=4)
+
+
+def test_similarity_scores_max_pools_per_path() -> None:
+    idx = _multi_chunk_index()
+    # Query points exactly at file_a chunk 0; chunk 1 should have lower score.
+    query = numpy.array([1.0, 0.0, 0.0, 0.0], dtype=numpy.float32)
+    scores = idx.similarity_scores(query)
+    # Two paths even though three rows exist.
+    assert set(scores.keys()) == {"file_a.py", "file_b.py"}
+    # file_a wins via chunk 0 (score = 1.0), not the 0.707 of chunk 1.
+    assert scores["file_a.py"] == pytest.approx(1.0, abs=1e-5)
+    assert scores["file_b.py"] == pytest.approx(0.0, abs=1e-5)
+
+
+def test_similarity_scores_by_id_returns_all_chunks() -> None:
+    idx = _multi_chunk_index()
+    query = numpy.array([1.0, 0.0, 0.0, 0.0], dtype=numpy.float32)
+    raw = idx.similarity_scores_by_id(query)
+    # Three rows because per-chunk scoring doesn't aggregate.
+    assert len(raw) == 3
+
+
+def test_delete_by_path_removes_all_chunks() -> None:
+    idx = _multi_chunk_index()
+    removed = idx.delete_by_path("file_a.py")
+    assert removed == 2
+    assert len(idx) == 1
+    assert idx.entries[0].path == "file_b.py"
+    assert idx.vectors.shape == (1, 4)
+
+
+def test_delete_by_path_missing_returns_zero() -> None:
+    idx = _multi_chunk_index()
+    assert idx.delete_by_path("not_in_index.py") == 0
+    assert len(idx) == 3
+
+
+def test_add_entries_appends_multiple_chunks() -> None:
+    idx = _multi_chunk_index()
+    new_vecs = numpy.array(
+        [[0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]], dtype=numpy.float32
+    )
+    new_entries = [
+        IndexEntry(
+            path="file_c.py", kind="code", content_hash="c0",
+            metadata={"chunk_index": 0},
+        ),
+        IndexEntry(
+            path="file_c.py", kind="code", content_hash="c1",
+            metadata={"chunk_index": 1},
+        ),
+    ]
+    idx.add_entries(new_entries, new_vecs)
+    assert len(idx) == 5
+    paths = [e.path for e in idx.entries]
+    assert paths.count("file_c.py") == 2
+
+
+def test_add_entries_to_empty_index() -> None:
+    idx = VectorIndex(model_name="test", dimension=4)
+    vecs = numpy.array([[1.0, 0.0, 0.0, 0.0]], dtype=numpy.float32)
+    idx.add_entries(
+        [IndexEntry(path="x.py", kind="code", content_hash="h")], vecs
+    )
+    assert len(idx) == 1
+    assert idx.vectors.shape == (1, 4)
+
+
+def test_add_entries_length_mismatch_raises() -> None:
+    idx = VectorIndex(model_name="test", dimension=4)
+    with pytest.raises(ValueError, match="entries but"):
+        idx.add_entries(
+            [IndexEntry(path="x", kind="code", content_hash="h")],
+            numpy.zeros((2, 4), dtype=numpy.float32),
+        )
+
+
+# -- schema versioning ---------------------------------------------------------
+
+
+def test_save_writes_schema_version(tmp_path: Path) -> None:
+    import json
+
+    idx = _make_index()
+    idx.save(tmp_path / "idx")
+    config = json.loads((tmp_path / "idx" / "index_config.json").read_text())
+    assert config["schema_version"] == SCHEMA_VERSION
+
+
+def test_load_rejects_v1_index(tmp_path: Path) -> None:
+    """A pre-schema-versioning index should fail with a clear rebuild prompt."""
+    import json
+
+    d = tmp_path / "v1"
+    idx = _make_index()
+    idx.save(d)
+    # Strip schema_version to simulate v1 layout.
+    config_path = d / "index_config.json"
+    config = json.loads(config_path.read_text())
+    config.pop("schema_version", None)
+    config_path.write_text(json.dumps(config))
+
+    with pytest.raises(IndexSchemaMismatch, match="rebuild"):
+        VectorIndex.load(d)
+
+
+def test_load_rejects_future_schema(tmp_path: Path) -> None:
+    import json
+
+    d = tmp_path / "v999"
+    idx = _make_index()
+    idx.save(d)
+    config_path = d / "index_config.json"
+    config = json.loads(config_path.read_text())
+    config["schema_version"] = 999
+    config_path.write_text(json.dumps(config))
+
+    with pytest.raises(IndexSchemaMismatch):
+        VectorIndex.load(d)

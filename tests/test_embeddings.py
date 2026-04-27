@@ -7,9 +7,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from repoctx.chunker import Chunk
 from repoctx.config import DEFAULT_EMBEDDING_CONFIG, EmbeddingConfig
 from repoctx.embeddings import (
     EmbeddingRetriever,
+    build_enriched_chunk_text,
     build_enriched_text,
     content_hash,
 )
@@ -147,3 +149,136 @@ def test_embedding_model_requires_deps() -> None:
     with patch("repoctx.embeddings.HAS_EMBEDDINGS", False):
         with pytest.raises(ImportError, match="sentence-transformers"):
             EmbeddingModel()
+
+
+# -- enriched chunk text -----------------------------------------------------
+
+
+def test_enriched_chunk_text_includes_symbol_and_lines() -> None:
+    record = FileRecord(
+        path="src/auth/service.py",
+        absolute_path=Path("/repo/src/auth/service.py"),
+        extension=".py",
+        kind="code",
+        content="def login():\n    pass\n",
+    )
+    chunk = Chunk(
+        text="def login():\n    pass",
+        start_line=42,
+        end_line=87,
+        enclosing_symbol="AuthService.login",
+        chunk_index=3,
+    )
+    text = build_enriched_chunk_text(record, chunk)
+    assert "file: src/auth/service.py" in text
+    assert "kind: code" in text
+    assert "module: src/auth" in text
+    assert "symbol: AuthService.login" in text
+    assert "lines: 42-87" in text
+    assert "def login()" in text
+
+
+def test_enriched_chunk_text_omits_symbol_when_none() -> None:
+    record = FileRecord(
+        path="x.py",
+        absolute_path=Path("/repo/x.py"),
+        extension=".py",
+        kind="code",
+        content="X = 1\n",
+    )
+    chunk = Chunk(text="X = 1", start_line=1, end_line=1, enclosing_symbol=None, chunk_index=0)
+    text = build_enriched_chunk_text(record, chunk)
+    assert "symbol:" not in text
+    assert "lines: 1-1" in text
+
+
+# -- build_index orchestration (model mocked) --------------------------------
+
+
+class _FakeModel:
+    """Stand-in for EmbeddingModel that returns deterministic vectors."""
+
+    def __init__(self) -> None:
+        import numpy as np
+
+        self._np = np
+        self.dimension = 8
+        self.encoded_texts: list[list[str]] = []
+
+    def encode_documents(self, texts, *, show_progress=True):
+        self.encoded_texts.append(list(texts))
+        return self._np.eye(len(texts), self.dimension, dtype=self._np.float32)
+
+    def encode_query(self, text):
+        return self._np.zeros(self.dimension, dtype=self._np.float32)
+
+
+def test_build_index_emits_multiple_chunks_per_long_file(tmp_path: Path) -> None:
+    """A long file should produce >1 chunks, all stored under the same path."""
+    pytest.importorskip("numpy")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    # Long Python file: two functions of ~80 lines each.
+    body = "\n".join("    x = 1" for _ in range(80))
+    (repo / "long.py").write_text(
+        f"def foo():\n{body}\n\ndef bar():\n{body}\n"
+    )
+
+    fake = _FakeModel()
+    with patch("repoctx.embeddings.EmbeddingModel", return_value=fake):
+        from repoctx.chunker import ChunkConfig
+        from repoctx.embeddings import build_index
+
+        idx = build_index(
+            repo,
+            chunk_config=ChunkConfig(
+                target_tokens=80, max_tokens=200, overlap_tokens=0, min_tokens=10,
+            ),
+        )
+
+    # Multiple chunks for long.py — confirm via entry count and shared path.
+    paths = [e.path for e in idx.entries]
+    assert paths.count("long.py") >= 2
+    # Each entry tagged as a chunk with span metadata.
+    for e in idx.entries:
+        assert e.record_type == "chunk"
+        assert "chunk_index" in e.metadata
+        assert "start_line" in e.metadata
+        assert "end_line" in e.metadata
+    # chunk_index should be sequential within a path.
+    long_meta = [e.metadata for e in idx.entries if e.path == "long.py"]
+    assert sorted(m["chunk_index"] for m in long_meta) == list(range(len(long_meta)))
+
+
+def test_update_file_in_index_replaces_all_chunks(tmp_path: Path) -> None:
+    pytest.importorskip("numpy")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    body = "\n".join("    x = 1" for _ in range(80))
+    long_py = repo / "long.py"
+    long_py.write_text(f"def foo():\n{body}\n\ndef bar():\n{body}\n")
+
+    fake = _FakeModel()
+    with patch("repoctx.embeddings.EmbeddingModel", return_value=fake):
+        from repoctx.chunker import ChunkConfig
+        from repoctx.embeddings import build_index, update_file_in_index
+
+        cfg = EmbeddingConfig()
+        chunk_cfg = ChunkConfig(
+            target_tokens=80, max_tokens=200, overlap_tokens=0, min_tokens=10,
+        )
+        idx = build_index(repo, config=cfg, chunk_config=chunk_cfg)
+        index_dir = repo / cfg.index_dir / "embeddings"
+        idx.save(index_dir)
+        before = sum(1 for e in idx.entries if e.path == "long.py")
+        assert before >= 2
+
+        # Shrink the file dramatically — fewer chunks expected.
+        long_py.write_text("def foo():\n    return 1\n")
+        update_file_in_index("long.py", repo, config=cfg, chunk_config=chunk_cfg)
+
+        from repoctx.vector_index import VectorIndex
+        reloaded = VectorIndex.load(index_dir)
+        after = sum(1 for e in reloaded.entries if e.path == "long.py")
+        assert after >= 1
+        assert after < before  # old chunks were removed
