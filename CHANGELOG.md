@@ -4,7 +4,9 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [1.0.0] — 2026-04-27
+
+First stable release. Embedding retrieval is now chunk-aware.
 
 ### Changed
 - **Embeddings now operate on chunks, not whole files.** `build_index` runs a
