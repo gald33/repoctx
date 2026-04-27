@@ -6,6 +6,13 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Changed
+- **`repoctx install` now auto-builds the embedding index** when the
+  `[embeddings]` extras are importable, collapsing first-time setup to a
+  single command. Use `--no-index` to opt out, or `--with-index` to require
+  a build (errors if extras are missing). The install summary JSON gains an
+  `installed.embedding_index` entry reporting `built` / `skipped` status.
+
 ### Fixed
 - **Apple silicon MPS OOM during `repoctx index`** is now handled
   automatically. Chunk-aware embedding produces ~5× more rows per file than

@@ -218,6 +218,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip the contracts/docs/examples scaffold (just register MCP entries)",
     )
+    ia_all_index = ia_all.add_mutually_exclusive_group()
+    ia_all_index.add_argument(
+        "--no-index",
+        dest="build_index",
+        action="store_false",
+        default=None,
+        help="Skip building the embedding index (default: build iff [embeddings] extras are installed)",
+    )
+    ia_all_index.add_argument(
+        "--with-index",
+        dest="build_index",
+        action="store_true",
+        help="Force-build the embedding index (errors if [embeddings] extras are missing)",
+    )
 
     ic = sub.add_parser(
         "install-claude-code",
@@ -389,7 +403,11 @@ def _cmd_detect_changes(args: argparse.Namespace) -> None:
 def _cmd_install_all(args: argparse.Namespace) -> None:
     from repoctx.harness import install_all
 
-    result = install_all(repo_root=args.repo, scaffold_authority=not args.no_scaffold)
+    result = install_all(
+        repo_root=args.repo,
+        scaffold_authority=not args.no_scaffold,
+        build_index=args.build_index,
+    )
     print(json.dumps(result, indent=2))
 
 
