@@ -4,7 +4,9 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [1.0.2] — 2026-04-27
+
+Patch release. Big GPU memory reduction during indexing.
 
 ### Changed
 - **Embedding indexing now uses fp16 + shorter sequences on accelerators.**
