@@ -462,3 +462,16 @@ def test_cli_help_includes_examples_and_subcommand_guidance(monkeypatch, capsys)
     assert "Common subcommands:" in stdout
     assert "query" in stdout
     assert "experiment" in stdout
+
+
+def test_cli_version_prints_version_and_exits_zero(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(sys, "argv", ["repoctx", "--version"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        repoctx_main.main()
+
+    assert exc_info.value.code == 0
+    output = capsys.readouterr()
+    combined = output.out + output.err
+    assert combined.startswith("repoctx ")
+    assert combined.strip().split()[-1]
