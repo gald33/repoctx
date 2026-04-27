@@ -4,6 +4,21 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 [SemVer](https://semver.org/).
 
+## [1.0.3] — 2026-04-27
+
+Polish release. Cleaner indexing on repos with active Claude Code worktrees.
+
+### Fixed
+- **`.claude/` is now in `IGNORED_DIRS`**. Repos with active Claude Code
+  worktrees were getting every file double-indexed (once at the canonical
+  path, once under `.claude/worktrees/<branch>/...`), inflating the chunk
+  count and adding noise to retrieval. The standalone `.worktrees/` entry
+  remains for repos using that convention without `.claude/`.
+- **`repoctx index` reports chunks vs. files honestly.** Output now reads
+  `Indexed N chunks across M files` (was `Indexed N files`, where N was
+  actually the chunk count). `index_config.json` reports `entry_count`
+  (chunks) and `file_count` (distinct paths) as separate fields.
+
 ## [1.0.2] — 2026-04-27
 
 Patch release. Big GPU memory reduction during indexing.
