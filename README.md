@@ -372,13 +372,18 @@ The index command scans the repository, splits each file into overlapping chunks
 
 > **Upgrading from a v1 index**: the on-disk format changed in 1.0.0 (`schema_version: 2`). Old indexes raise `IndexSchemaMismatch` on load. Delete `.repoctx/embeddings/` and re-run `repoctx index` once after upgrading.
 
-> **Apple silicon (MPS)**: indexing handles MPS pressure automatically. Batch size is clamped to 8 on MPS, and any catchable encode error transparently falls back to CPU. The rare uncatchable Metal C++ assertion (only on very large repos) still requires forcing CPU manually:
+> **Apple silicon (MPS)**: indexing handles GPU memory automatically. Defaults are tuned for low peak Metal buffer usage: fp16 weights & activations, `max_seq_length=256`, `batch_size` clamped to 8, and cache eviction between super-batches. Catchable encode errors fall back to CPU transparently. The rare uncatchable Metal C++ assertion (only on very large repos) still requires forcing CPU manually:
 >
 > ```bash
 > REPOCTX_EMBEDDING_DEVICE=cpu repoctx index
 > ```
 >
-> Tunables: `REPOCTX_EMBEDDING_DEVICE` (`cpu` / `cuda` / `mps`) and `REPOCTX_EMBEDDING_BATCH_SIZE` (default 16).
+> Tunables (env vars):
+>
+> - `REPOCTX_EMBEDDING_DEVICE` — `cpu` / `cuda` / `mps` / `auto`
+> - `REPOCTX_EMBEDDING_BATCH_SIZE` — default 16 (clamped to 8 on MPS)
+> - `REPOCTX_EMBEDDING_MAX_SEQ_LENGTH` — default 256
+> - `REPOCTX_EMBEDDING_DTYPE` — `fp16` / `fp32` / `auto` (auto = fp16 on accelerators, fp32 on CPU)
 
 ### End-to-end first-time setup
 

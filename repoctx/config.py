@@ -112,6 +112,15 @@ class EmbeddingConfig:
     # Batch size for encode_documents. Larger = faster but more peak RAM
     # and (on MPS) larger Metal buffers. Override via REPOCTX_EMBEDDING_BATCH_SIZE.
     batch_size: int = 16
+    # Maximum tokens per row. Attention activations scale as seq_len², so
+    # halving this from a typical 512 cuts peak memory ~4×. Most code chunks
+    # fit in 256 tokens; longer chunks are truncated. Override via
+    # REPOCTX_EMBEDDING_MAX_SEQ_LENGTH.
+    max_seq_length: int = 256
+    # Weight/activation dtype: "auto" picks fp16 on MPS/CUDA, fp32 on CPU
+    # (fp16 on CPU is slower than fp32 in PyTorch). "fp32" / "fp16" pin the
+    # choice. Override via REPOCTX_EMBEDDING_DTYPE.
+    dtype: str = "auto"
 
 
 DEFAULT_EMBEDDING_CONFIG = EmbeddingConfig()
