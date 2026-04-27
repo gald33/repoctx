@@ -104,6 +104,14 @@ class EmbeddingConfig:
     model_name: str = "Qwen/Qwen3-Embedding-0.6B"
     max_content_chars: int = 8000
     index_dir: str = ".repoctx"
+    # device: None = auto-detect (sentence-transformers default), or
+    # "cpu" / "cuda" / "mps". Overridable via REPOCTX_EMBEDDING_DEVICE.
+    # MPS auto-detection has been a source of OOM on Apple silicon when
+    # encoding many chunks in one batch; "cpu" is the safe fallback.
+    device: str | None = None
+    # Batch size for encode_documents. Larger = faster but more peak RAM
+    # and (on MPS) larger Metal buffers. Override via REPOCTX_EMBEDDING_BATCH_SIZE.
+    batch_size: int = 16
 
 
 DEFAULT_EMBEDDING_CONFIG = EmbeddingConfig()

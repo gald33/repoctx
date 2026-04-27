@@ -4,6 +4,19 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **Apple silicon MPS OOM during `repoctx index`**: chunk-aware embedding
+  produces ~5× more rows per file than the previous whole-file approach,
+  which exposed a latent issue where `sentence-transformers` auto-selected
+  MPS and tried to allocate a Metal buffer larger than physical memory.
+  `EmbeddingConfig` now has explicit `device` and `batch_size` fields, both
+  also overridable via `REPOCTX_EMBEDDING_DEVICE` and
+  `REPOCTX_EMBEDDING_BATCH_SIZE` env vars. Default `batch_size` is 16.
+  When you hit `Failed to allocate private MTLBuffer`, run
+  `REPOCTX_EMBEDDING_DEVICE=cpu repoctx index`.
+
 ## [1.0.0] — 2026-04-27
 
 First stable release. Embedding retrieval is now chunk-aware.

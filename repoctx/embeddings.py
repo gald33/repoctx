@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 from pathlib import Path, PurePosixPath
 from time import perf_counter
 from typing import TYPE_CHECKING
@@ -79,6 +80,28 @@ def content_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()[:16]
 
 
+def _resolve_device(config: EmbeddingConfig) -> str | None:
+    """Pick device for sentence-transformers.
+
+    Priority: REPOCTX_EMBEDDING_DEVICE env var > config.device > auto-detect.
+    Returns None to let sentence-transformers auto-detect.
+    """
+    env = os.environ.get("REPOCTX_EMBEDDING_DEVICE")
+    if env:
+        return env
+    return config.device
+
+
+def _resolve_batch_size(config: EmbeddingConfig) -> int:
+    env = os.environ.get("REPOCTX_EMBEDDING_BATCH_SIZE")
+    if env:
+        try:
+            return max(1, int(env))
+        except ValueError:
+            logger.warning("Invalid REPOCTX_EMBEDDING_BATCH_SIZE=%r; using config", env)
+    return config.batch_size
+
+
 class EmbeddingModel:
     """Thin wrapper around a sentence-transformers model."""
 
@@ -89,8 +112,16 @@ class EmbeddingModel:
                 "Install with: pip install 'repoctx-mcp[embeddings]'"
             )
         self.config = config
-        logger.info("Loading embedding model %s …", config.model_name)
-        self._model = SentenceTransformer(config.model_name, trust_remote_code=True)
+        device = _resolve_device(config)
+        self.batch_size: int = _resolve_batch_size(config)
+        logger.info(
+            "Loading embedding model %s on %s (batch_size=%d) …",
+            config.model_name, device or "auto", self.batch_size,
+        )
+        kwargs: dict = {"trust_remote_code": True}
+        if device:
+            kwargs["device"] = device
+        self._model = SentenceTransformer(config.model_name, **kwargs)
         self.dimension: int = self._model.get_sentence_embedding_dimension()
 
     def encode_documents(self, texts: list[str], *, show_progress: bool = True) -> np.ndarray:
@@ -101,6 +132,7 @@ class EmbeddingModel:
             texts,
             normalize_embeddings=True,
             show_progress_bar=show_progress,
+            batch_size=self.batch_size,
         )
 
     def encode_query(self, text: str) -> np.ndarray:

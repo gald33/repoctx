@@ -372,6 +372,14 @@ The index command scans the repository, splits each file into overlapping chunks
 
 > **Upgrading from a v1 index**: the on-disk format changed in 1.0.0 (`schema_version: 2`). Old indexes raise `IndexSchemaMismatch` on load. Delete `.repoctx/embeddings/` and re-run `repoctx index` once after upgrading.
 
+> **Apple silicon (MPS) note**: chunk-aware indexing produces ~5× more rows per file than the old whole-file approach, which can blow the Metal allocator on larger repos. If you see a `Failed to allocate private MTLBuffer` error, force CPU encoding:
+>
+> ```bash
+> REPOCTX_EMBEDDING_DEVICE=cpu repoctx index
+> ```
+>
+> CPU is slower but reliable. You can also tune `REPOCTX_EMBEDDING_BATCH_SIZE` (default 16) downward if even CPU encoding hits memory limits.
+
 ### End-to-end first-time setup
 
 ```bash
