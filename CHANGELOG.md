@@ -4,6 +4,34 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- **Embedding indexing now uses fp16 + shorter sequences on accelerators.**
+  Three additive optimizations cut peak GPU memory ~6-8× on Apple silicon
+  (and CUDA) without affecting retrieval quality:
+  - **fp16 weights & activations** when device is MPS or CUDA. Halves
+    weight footprint and activation memory. CPU stays in fp32 (where fp16
+    is slower in PyTorch). Override via `REPOCTX_EMBEDDING_DTYPE`
+    (`fp16` / `fp32` / `auto`).
+  - **`max_seq_length` default lowered to 256.** Attention activations
+    scale as seq_len², so this alone is a ~4× cut. Most code chunks fit
+    in 256 model tokens; longer chunks are truncated. Override via
+    `REPOCTX_EMBEDDING_MAX_SEQ_LENGTH`.
+  - **Super-batched encoding with cache eviction.** On MPS/CUDA, inputs
+    are encoded in groups of `batch_size × 8` and `torch.{mps,cuda}.empty_cache()`
+    is called between groups, bounding heap fragmentation across long
+    indexing runs. CPU runs as a single call.
+
+  Combined with the existing batch_size=8 clamp on MPS, peak Metal buffer
+  drops from ~6 GB (1.0.0) to under 1 GB for typical chunks.
+
+  CPU-fallback path additionally recasts back to fp32 since CPU fp16 is
+  slower in PyTorch.
+
+  `EmbeddingConfig` gains `dtype: str = "auto"` and `max_seq_length: int = 256`
+  fields.
+
 ## [1.0.1] — 2026-04-27
 
 Patch release. One-command first-time setup; reliable indexing on Apple silicon.

@@ -102,12 +102,40 @@ def _resolve_batch_size(config: EmbeddingConfig) -> int:
     return config.batch_size
 
 
+def _resolve_max_seq_length(config: EmbeddingConfig) -> int:
+    env = os.environ.get("REPOCTX_EMBEDDING_MAX_SEQ_LENGTH")
+    if env:
+        try:
+            return max(8, int(env))
+        except ValueError:
+            logger.warning("Invalid REPOCTX_EMBEDDING_MAX_SEQ_LENGTH=%r; using config", env)
+    return config.max_seq_length
+
+
+def _resolve_dtype(config: EmbeddingConfig, device: str) -> str:
+    """Return 'fp16' or 'fp32'. 'auto' picks fp16 on accelerators, fp32 on CPU."""
+    env = os.environ.get("REPOCTX_EMBEDDING_DTYPE", config.dtype).lower()
+    if env in {"fp16", "float16", "half"}:
+        return "fp16"
+    if env in {"fp32", "float32", "full"}:
+        return "fp32"
+    # auto / anything else
+    return "fp16" if device.startswith(("mps", "cuda")) else "fp32"
+
+
 # Empirically safe upper bound for MPS Metal buffer allocations on a 16 GB
-# Apple silicon machine encoding ~512-token chunks. Larger batches risk
-# tripping the unrecoverable `Failed to allocate private MTLBuffer` assertion
-# (a C++ abort, not a Python exception — uncatchable). Auto-clamped when
-# the resolved device is MPS.
+# Apple silicon machine encoding ~256-token chunks at fp16. Larger batches
+# risk tripping the unrecoverable `Failed to allocate private MTLBuffer`
+# assertion (a C++ abort, not a Python exception — uncatchable). Auto-clamped
+# when the resolved device is MPS.
 _MPS_MAX_BATCH = 8
+
+# Number of accelerator mini-batches to run before forcibly evicting the
+# device cache. On MPS/CUDA, sentence-transformers' inner batching doesn't
+# free heap between mini-batches, so fragmentation accumulates over a long
+# encode. We chunk inputs into super-batches of (batch_size × this) and call
+# torch.{mps,cuda}.empty_cache() between super-batches to bound peak heap.
+_SUPER_BATCH_MULTIPLIER = 8
 
 
 class EmbeddingModel:
@@ -123,10 +151,12 @@ class EmbeddingModel:
         requested_device = _resolve_device(config)
         self._device: str = self._load_model(config, requested_device)
         self.batch_size: int = self._resolve_effective_batch_size(config, self._device)
+        self._apply_dtype_and_seq_length()
         self.dimension: int = self._model.get_sentence_embedding_dimension()
         logger.info(
-            "Embedding model %s loaded on %s (batch_size=%d)",
+            "Embedding model %s loaded on %s (batch_size=%d, max_seq_length=%d, dtype=%s)",
             config.model_name, self._device, self.batch_size,
+            self._model.max_seq_length, self._dtype,
         )
 
     def _load_model(self, config: EmbeddingConfig, device: str | None) -> str:
@@ -138,6 +168,31 @@ class EmbeddingModel:
         # str() it for stable comparison ("cpu", "mps", "cuda:0", ...).
         resolved = str(getattr(self._model, "device", device or "cpu"))
         return resolved
+
+    def _apply_dtype_and_seq_length(self) -> None:
+        """Cast to fp16 (if applicable) and shorten max_seq_length.
+
+        These two tunables are the dominant memory savers — fp16 halves
+        weight & activation footprint, and seq_length cuts attention's
+        quadratic peak roughly 4× per halving. Together: ~6-8× reduction
+        on MPS for typical chunk sizes.
+        """
+        self._dtype = _resolve_dtype(self.config, self._device)
+        if self._dtype == "fp16":
+            try:
+                self._model = self._model.half()
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("fp16 cast failed (%s); staying on fp32", exc)
+                self._dtype = "fp32"
+        seq = _resolve_max_seq_length(self.config)
+        # Don't exceed the model's tokenizer limit.
+        try:
+            limit = getattr(self._model.tokenizer, "model_max_length", seq)
+            if isinstance(limit, int) and limit > 0:
+                seq = min(seq, limit)
+        except Exception:
+            pass
+        self._model.max_seq_length = seq
 
     @staticmethod
     def _resolve_effective_batch_size(config: EmbeddingConfig, device: str) -> int:
@@ -155,27 +210,80 @@ class EmbeddingModel:
         """Recreate the model on CPU after a device-specific failure."""
         self._model = self._model.to("cpu")
         self._device = "cpu"
+        # CPU is faster in fp32 in PyTorch, and the memory pressure that
+        # forced fp16 doesn't apply here. Cast back if we were on fp16.
+        if self._dtype == "fp16":
+            try:
+                self._model = self._model.float()
+                self._dtype = "fp32"
+            except Exception:  # pragma: no cover - defensive
+                pass
         # Recompute effective batch size now that we're off the constrained device.
         self.batch_size = _resolve_batch_size(self.config)
+
+    def _empty_device_cache(self) -> None:
+        """Evict accelerator memory cache between super-batches.
+
+        No-op on CPU. Wrapped in try/except since some torch builds expose
+        `torch.mps.empty_cache` and others don't.
+        """
+        if not self._device.startswith(("mps", "cuda")):
+            return
+        try:
+            import torch  # type: ignore[import-not-found]
+
+            if self._device.startswith("mps") and hasattr(torch, "mps"):
+                empty = getattr(torch.mps, "empty_cache", None)
+                if empty:
+                    empty()
+            elif self._device.startswith("cuda"):
+                torch.cuda.empty_cache()
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+    def _encode_call(self, texts, show_progress: bool):
+        """Single encode call with the configured knobs. Used by both paths."""
+        return self._model.encode(
+            texts,
+            normalize_embeddings=True,
+            show_progress_bar=show_progress,
+            batch_size=self.batch_size,
+        )
 
     def encode_documents(self, texts: list[str], *, show_progress: bool = True) -> np.ndarray:
         """Encode document texts. Returns (N, dim) float32 array, L2-normalised.
 
-        On a catchable device error (most commonly MPS / CUDA OOM raised as
-        ``RuntimeError``), automatically falls back to CPU and retries once.
-        Some Metal failures are C++ aborts that crash the process before we
-        ever see a Python exception — those still require setting
-        ``REPOCTX_EMBEDDING_DEVICE=cpu`` up front.
+        On accelerators, the input is split into super-batches and the device
+        cache is evicted between them to bound peak heap fragmentation. On
+        CPU, runs as one call.
+
+        On a catchable device error (most commonly MPS/CUDA OOM raised as
+        ``RuntimeError``), automatically falls back to CPU and retries.
         """
         if not texts:
             return _np.empty((0, self.dimension), dtype=_np.float32)
+
+        on_accelerator = self._device.startswith(("mps", "cuda"))
+        super_batch = self.batch_size * _SUPER_BATCH_MULTIPLIER
+
         try:
-            return self._model.encode(
-                texts,
-                normalize_embeddings=True,
-                show_progress_bar=show_progress,
-                batch_size=self.batch_size,
-            )
+            if not on_accelerator or len(texts) <= super_batch:
+                return self._encode_call(texts, show_progress)
+            # Super-batched path: encode in groups, evict cache between.
+            parts: list[np.ndarray] = []
+            n = len(texts)
+            for i in range(0, n, super_batch):
+                sub = texts[i : i + super_batch]
+                # Show progress only on the first sub-call so the bar doesn't
+                # repeat; users still see overall progress via logging below.
+                parts.append(self._encode_call(sub, show_progress and i == 0))
+                self._empty_device_cache()
+                if show_progress:
+                    logger.info(
+                        "Encoded %d / %d (%s super-batches)",
+                        min(i + super_batch, n), n, self._device,
+                    )
+            return _np.vstack(parts)
         except RuntimeError as exc:
             if self._device == "cpu":
                 raise
@@ -184,12 +292,7 @@ class EmbeddingModel:
                 self._device, exc,
             )
             self._move_to_cpu()
-            return self._model.encode(
-                texts,
-                normalize_embeddings=True,
-                show_progress_bar=show_progress,
-                batch_size=self.batch_size,
-            )
+            return self._encode_call(texts, show_progress)
 
     def encode_query(self, text: str) -> np.ndarray:
         """Encode a single query. Returns (dim,) float32 array, L2-normalised."""

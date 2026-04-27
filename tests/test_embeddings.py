@@ -154,6 +154,10 @@ def test_embedding_model_requires_deps() -> None:
 # -- device + batch resolution & MPS fallback --------------------------------
 
 
+class _SpyTokenizer:
+    model_max_length = 8192
+
+
 class _SpyModel:
     """Stub that records encode calls and lets tests inject a failure."""
 
@@ -161,6 +165,9 @@ class _SpyModel:
         self.device = device
         self._fail_remaining = fail_first_n
         self.encode_calls: list[dict] = []
+        self.max_seq_length = 8192  # default; overwritten by _apply_dtype_and_seq_length
+        self.dtype = "fp32"
+        self.tokenizer = _SpyTokenizer()
 
     def get_sentence_embedding_dimension(self) -> int:
         return 8
@@ -168,7 +175,7 @@ class _SpyModel:
     def encode(self, texts, **kwargs):
         import numpy as np
 
-        self.encode_calls.append({"device": self.device, **kwargs})
+        self.encode_calls.append({"device": self.device, "n": len(texts) if not isinstance(texts, str) else 1, **kwargs})
         if self._fail_remaining > 0:
             self._fail_remaining -= 1
             raise RuntimeError("simulated device OOM")
@@ -178,6 +185,14 @@ class _SpyModel:
 
     def to(self, device):
         self.device = device
+        return self
+
+    def half(self):
+        self.dtype = "fp16"
+        return self
+
+    def float(self):
+        self.dtype = "fp32"
         return self
 
 
@@ -276,6 +291,159 @@ def test_encode_query_falls_back_too() -> None:
         v = m.encode_query("hello")
     assert v.shape == (8,)
     assert m._device == "cpu"
+
+
+# -- fp16 + max_seq_length + super-batch cache eviction ----------------------
+
+
+def test_fp16_applied_on_mps_by_default() -> None:
+    from repoctx.embeddings import EmbeddingModel
+
+    spy = _SpyModel(device="mps")
+    cfg = EmbeddingConfig(device="mps")  # dtype="auto"
+    with _patch_st(spy):
+        m = EmbeddingModel(cfg)
+    assert spy.dtype == "fp16"
+    assert m._dtype == "fp16"
+
+
+def test_fp32_default_on_cpu() -> None:
+    from repoctx.embeddings import EmbeddingModel
+
+    spy = _SpyModel(device="cpu")
+    cfg = EmbeddingConfig(device="cpu")
+    with _patch_st(spy):
+        m = EmbeddingModel(cfg)
+    assert spy.dtype == "fp32"
+    assert m._dtype == "fp32"
+
+
+def test_explicit_fp32_pin_overrides_auto() -> None:
+    from repoctx.embeddings import EmbeddingModel
+
+    spy = _SpyModel(device="mps")
+    cfg = EmbeddingConfig(device="mps", dtype="fp32")
+    with _patch_st(spy):
+        m = EmbeddingModel(cfg)
+    assert m._dtype == "fp32"
+    assert spy.dtype == "fp32"
+
+
+def test_explicit_fp16_pin_on_cpu() -> None:
+    from repoctx.embeddings import EmbeddingModel
+
+    spy = _SpyModel(device="cpu")
+    cfg = EmbeddingConfig(device="cpu", dtype="fp16")
+    with _patch_st(spy):
+        m = EmbeddingModel(cfg)
+    # User explicitly asked for fp16 even on CPU; honor it.
+    assert m._dtype == "fp16"
+
+
+def test_max_seq_length_applied() -> None:
+    from repoctx.embeddings import EmbeddingModel
+
+    spy = _SpyModel(device="cpu")
+    cfg = EmbeddingConfig(device="cpu", max_seq_length=128)
+    with _patch_st(spy):
+        m = EmbeddingModel(cfg)
+    assert spy.max_seq_length == 128
+    assert m._model.max_seq_length == 128
+
+
+def test_max_seq_length_caps_at_tokenizer_limit() -> None:
+    from repoctx.embeddings import EmbeddingModel
+
+    spy = _SpyModel(device="cpu")
+    spy.tokenizer = _SpyTokenizer()
+    spy.tokenizer.model_max_length = 64
+    cfg = EmbeddingConfig(device="cpu", max_seq_length=512)
+    with _patch_st(spy):
+        m = EmbeddingModel(cfg)
+    # Tokenizer limit (64) wins over config (512).
+    assert spy.max_seq_length == 64
+
+
+def test_max_seq_length_env_override(monkeypatch) -> None:
+    from repoctx.embeddings import EmbeddingModel
+
+    monkeypatch.setenv("REPOCTX_EMBEDDING_MAX_SEQ_LENGTH", "192")
+    spy = _SpyModel(device="cpu")
+    cfg = EmbeddingConfig(device="cpu", max_seq_length=512)
+    with _patch_st(spy):
+        m = EmbeddingModel(cfg)
+    assert spy.max_seq_length == 192
+
+
+def test_dtype_env_override(monkeypatch) -> None:
+    from repoctx.embeddings import EmbeddingModel
+
+    monkeypatch.setenv("REPOCTX_EMBEDDING_DTYPE", "fp32")
+    spy = _SpyModel(device="mps")
+    cfg = EmbeddingConfig(device="mps")  # would default to fp16
+    with _patch_st(spy):
+        m = EmbeddingModel(cfg)
+    assert m._dtype == "fp32"
+
+
+def test_super_batch_evicts_cache_between_groups() -> None:
+    """On accelerators, large input is split into super-batches with
+    empty_cache() called between groups."""
+    from repoctx.embeddings import EmbeddingModel, _SUPER_BATCH_MULTIPLIER
+
+    spy = _SpyModel(device="mps")
+    cfg = EmbeddingConfig(device="mps", batch_size=4)
+    with _patch_st(spy):
+        m = EmbeddingModel(cfg)
+        super_size = m.batch_size * _SUPER_BATCH_MULTIPLIER  # 4 * 8 = 32
+        # Encode 80 texts → expect ceil(80/32) = 3 super-batches.
+        out = m.encode_documents(["t"] * 80, show_progress=False)
+    assert out.shape == (80, 8)
+    # 3 encode calls (one per super-batch).
+    assert len(spy.encode_calls) == 3
+    sizes = [c["n"] for c in spy.encode_calls]
+    assert sizes == [super_size, super_size, 80 - 2 * super_size]
+
+
+def test_no_super_batch_on_cpu() -> None:
+    """CPU path encodes in a single call regardless of input size."""
+    from repoctx.embeddings import EmbeddingModel
+
+    spy = _SpyModel(device="cpu")
+    cfg = EmbeddingConfig(device="cpu", batch_size=4)
+    with _patch_st(spy):
+        m = EmbeddingModel(cfg)
+        m.encode_documents(["t"] * 200, show_progress=False)
+    assert len(spy.encode_calls) == 1
+    assert spy.encode_calls[0]["n"] == 200
+
+
+def test_super_batch_skipped_when_input_small() -> None:
+    """If input fits in one super-batch, it's a single encode call."""
+    from repoctx.embeddings import EmbeddingModel, _SUPER_BATCH_MULTIPLIER
+
+    spy = _SpyModel(device="mps")
+    cfg = EmbeddingConfig(device="mps", batch_size=4)
+    with _patch_st(spy):
+        m = EmbeddingModel(cfg)
+        super_size = m.batch_size * _SUPER_BATCH_MULTIPLIER
+        m.encode_documents(["t"] * (super_size - 1), show_progress=False)
+    assert len(spy.encode_calls) == 1
+
+
+def test_cpu_fallback_recasts_to_fp32() -> None:
+    """When falling back from MPS+fp16 to CPU, dtype goes back to fp32."""
+    from repoctx.embeddings import EmbeddingModel
+
+    spy = _SpyModel(device="mps", fail_first_n=1)
+    cfg = EmbeddingConfig(device="mps")
+    with _patch_st(spy):
+        m = EmbeddingModel(cfg)
+        assert m._dtype == "fp16"
+        m.encode_documents(["a", "b"], show_progress=False)
+    assert m._device == "cpu"
+    assert m._dtype == "fp32"
+    assert spy.dtype == "fp32"
 
 
 # -- enriched chunk text -----------------------------------------------------
