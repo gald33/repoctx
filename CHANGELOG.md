@@ -4,6 +4,15 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- **`repoctx install` now auto-builds the embedding index** when the
+  `[embeddings]` extras are importable, collapsing first-time setup to a
+  single command. Use `--no-index` to opt out, or `--with-index` to require
+  a build (errors if extras are missing). The install summary JSON gains an
+  `installed.embedding_index` entry reporting `built` / `skipped` status.
+
 ## [1.0.0] — 2026-04-27
 
 First stable release. Embedding retrieval is now chunk-aware.
