@@ -4,6 +4,18 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 [SemVer](https://semver.org/).
 
+## [0.7.0] — 2026-04-27
+
+### Added
+- **`stats` CLI + MCP tool**: aggregates the telemetry already written to
+  `~/.repoctx/telemetry/repoctx-events.jsonl` into a per-op digest —
+  call counts, success rates, p50/p95 latency, output sizes, daily
+  activity histogram, top repos (hashed), surface breakdown, and recent
+  errors. Defaults to a 30-day window; pass `--days 0` for all time.
+  Output is markdown by default (`--format json` for machine-readable).
+  Read-only and privacy-preserving — query and repo-path strings are
+  already SHA-256 hashed at write time.
+
 ## [0.6.0] — 2026-04-26
 
 Four GitNexus-inspired capabilities, all additive — no schema breaks, no
