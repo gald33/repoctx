@@ -593,7 +593,8 @@ def _build_and_save_index(repo: Path) -> None:
         raise SystemExit(1)
     emb_dir = repo / DEFAULT_EMBEDDING_CONFIG.index_dir / "embeddings"
     record_store.save(emb_dir)
-    print(f"Indexed {len(record_store)} files → {emb_dir}")
+    unique_files = len({e.path for e in record_store.entries})
+    print(f"Indexed {len(record_store)} chunks across {unique_files} files → {emb_dir}")
 
 
 def _cmd_experiment_start(args: argparse.Namespace) -> None:
