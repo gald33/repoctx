@@ -102,6 +102,14 @@ def _resolve_batch_size(config: EmbeddingConfig) -> int:
     return config.batch_size
 
 
+# Empirically safe upper bound for MPS Metal buffer allocations on a 16 GB
+# Apple silicon machine encoding ~512-token chunks. Larger batches risk
+# tripping the unrecoverable `Failed to allocate private MTLBuffer` assertion
+# (a C++ abort, not a Python exception — uncatchable). Auto-clamped when
+# the resolved device is MPS.
+_MPS_MAX_BATCH = 8
+
+
 class EmbeddingModel:
     """Thin wrapper around a sentence-transformers model."""
 
@@ -112,32 +120,90 @@ class EmbeddingModel:
                 "Install with: pip install 'repoctx-mcp[embeddings]'"
             )
         self.config = config
-        device = _resolve_device(config)
-        self.batch_size: int = _resolve_batch_size(config)
+        requested_device = _resolve_device(config)
+        self._device: str = self._load_model(config, requested_device)
+        self.batch_size: int = self._resolve_effective_batch_size(config, self._device)
+        self.dimension: int = self._model.get_sentence_embedding_dimension()
         logger.info(
-            "Loading embedding model %s on %s (batch_size=%d) …",
-            config.model_name, device or "auto", self.batch_size,
+            "Embedding model %s loaded on %s (batch_size=%d)",
+            config.model_name, self._device, self.batch_size,
         )
+
+    def _load_model(self, config: EmbeddingConfig, device: str | None) -> str:
         kwargs: dict = {"trust_remote_code": True}
         if device:
             kwargs["device"] = device
         self._model = SentenceTransformer(config.model_name, **kwargs)
-        self.dimension: int = self._model.get_sentence_embedding_dimension()
+        # sentence-transformers exposes the resolved device on `.device`;
+        # str() it for stable comparison ("cpu", "mps", "cuda:0", ...).
+        resolved = str(getattr(self._model, "device", device or "cpu"))
+        return resolved
+
+    @staticmethod
+    def _resolve_effective_batch_size(config: EmbeddingConfig, device: str) -> int:
+        configured = _resolve_batch_size(config)
+        if device.startswith("mps") and configured > _MPS_MAX_BATCH:
+            logger.warning(
+                "Clamping batch_size %d → %d on MPS to reduce Metal allocator pressure. "
+                "Set REPOCTX_EMBEDDING_BATCH_SIZE to override.",
+                configured, _MPS_MAX_BATCH,
+            )
+            return _MPS_MAX_BATCH
+        return configured
+
+    def _move_to_cpu(self) -> None:
+        """Recreate the model on CPU after a device-specific failure."""
+        self._model = self._model.to("cpu")
+        self._device = "cpu"
+        # Recompute effective batch size now that we're off the constrained device.
+        self.batch_size = _resolve_batch_size(self.config)
 
     def encode_documents(self, texts: list[str], *, show_progress: bool = True) -> np.ndarray:
-        """Encode document texts. Returns (N, dim) float32 array, L2-normalised."""
+        """Encode document texts. Returns (N, dim) float32 array, L2-normalised.
+
+        On a catchable device error (most commonly MPS / CUDA OOM raised as
+        ``RuntimeError``), automatically falls back to CPU and retries once.
+        Some Metal failures are C++ aborts that crash the process before we
+        ever see a Python exception — those still require setting
+        ``REPOCTX_EMBEDDING_DEVICE=cpu`` up front.
+        """
         if not texts:
             return _np.empty((0, self.dimension), dtype=_np.float32)
-        return self._model.encode(
-            texts,
-            normalize_embeddings=True,
-            show_progress_bar=show_progress,
-            batch_size=self.batch_size,
-        )
+        try:
+            return self._model.encode(
+                texts,
+                normalize_embeddings=True,
+                show_progress_bar=show_progress,
+                batch_size=self.batch_size,
+            )
+        except RuntimeError as exc:
+            if self._device == "cpu":
+                raise
+            logger.warning(
+                "encode_documents failed on %s (%s); falling back to CPU and retrying.",
+                self._device, exc,
+            )
+            self._move_to_cpu()
+            return self._model.encode(
+                texts,
+                normalize_embeddings=True,
+                show_progress_bar=show_progress,
+                batch_size=self.batch_size,
+            )
 
     def encode_query(self, text: str) -> np.ndarray:
         """Encode a single query. Returns (dim,) float32 array, L2-normalised."""
-        return self._model.encode(text, normalize_embeddings=True)
+        try:
+            return self._model.encode(text, normalize_embeddings=True)
+        except RuntimeError as exc:
+            if self._device == "cpu":
+                raise
+            logger.warning(
+                "encode_query failed on %s (%s); falling back to CPU.",
+                self._device, exc,
+            )
+            self._move_to_cpu()
+            return self._model.encode(text, normalize_embeddings=True)
 
 
 class EmbeddingRetriever:

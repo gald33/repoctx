@@ -151,6 +151,133 @@ def test_embedding_model_requires_deps() -> None:
             EmbeddingModel()
 
 
+# -- device + batch resolution & MPS fallback --------------------------------
+
+
+class _SpyModel:
+    """Stub that records encode calls and lets tests inject a failure."""
+
+    def __init__(self, device: str = "cpu", *, fail_first_n: int = 0) -> None:
+        self.device = device
+        self._fail_remaining = fail_first_n
+        self.encode_calls: list[dict] = []
+
+    def get_sentence_embedding_dimension(self) -> int:
+        return 8
+
+    def encode(self, texts, **kwargs):
+        import numpy as np
+
+        self.encode_calls.append({"device": self.device, **kwargs})
+        if self._fail_remaining > 0:
+            self._fail_remaining -= 1
+            raise RuntimeError("simulated device OOM")
+        if isinstance(texts, str):
+            return np.zeros(8, dtype=np.float32)
+        return np.zeros((len(texts), 8), dtype=np.float32)
+
+    def to(self, device):
+        self.device = device
+        return self
+
+
+def _patch_st(spy: _SpyModel):
+    """Patch SentenceTransformer to return *spy* and HAS_EMBEDDINGS to True."""
+    return patch.multiple(
+        "repoctx.embeddings",
+        HAS_EMBEDDINGS=True,
+        SentenceTransformer=lambda *a, **kw: spy,
+    )
+
+
+def test_mps_clamps_batch_size_to_safe_default() -> None:
+    """When device resolves to MPS and configured batch > 8, we clamp."""
+    from repoctx.embeddings import EmbeddingModel, _MPS_MAX_BATCH
+
+    spy = _SpyModel(device="mps")
+    cfg = EmbeddingConfig(batch_size=32, device="mps")
+    with _patch_st(spy):
+        m = EmbeddingModel(cfg)
+    assert m.batch_size == _MPS_MAX_BATCH
+    assert m._device == "mps"
+
+
+def test_mps_does_not_clamp_when_user_explicitly_smaller() -> None:
+    """If the user already picked a small batch, we don't bump it up."""
+    from repoctx.embeddings import EmbeddingModel
+
+    spy = _SpyModel(device="mps")
+    cfg = EmbeddingConfig(batch_size=2, device="mps")
+    with _patch_st(spy):
+        m = EmbeddingModel(cfg)
+    assert m.batch_size == 2
+
+
+def test_cpu_device_never_clamps() -> None:
+    from repoctx.embeddings import EmbeddingModel
+
+    spy = _SpyModel(device="cpu")
+    cfg = EmbeddingConfig(batch_size=64, device="cpu")
+    with _patch_st(spy):
+        m = EmbeddingModel(cfg)
+    assert m.batch_size == 64
+
+
+def test_encode_documents_falls_back_to_cpu_on_runtime_error() -> None:
+    from repoctx.embeddings import EmbeddingModel
+
+    spy = _SpyModel(device="mps", fail_first_n=1)
+    cfg = EmbeddingConfig(device="mps")
+    with _patch_st(spy):
+        m = EmbeddingModel(cfg)
+        out = m.encode_documents(["hello", "world"], show_progress=False)
+    assert out.shape == (2, 8)
+    # Two encode calls: one on MPS that failed, one retry on CPU.
+    assert len(spy.encode_calls) == 2
+    assert spy.encode_calls[0]["device"] == "mps"
+    assert spy.encode_calls[1]["device"] == "cpu"
+    assert m._device == "cpu"
+
+
+def test_encode_documents_does_not_loop_when_cpu_also_fails() -> None:
+    """If CPU is the active device and it errors, the exception propagates."""
+    from repoctx.embeddings import EmbeddingModel
+
+    spy = _SpyModel(device="cpu", fail_first_n=1)
+    cfg = EmbeddingConfig(device="cpu")
+    with _patch_st(spy):
+        m = EmbeddingModel(cfg)
+        with pytest.raises(RuntimeError, match="simulated"):
+            m.encode_documents(["hello"], show_progress=False)
+    assert len(spy.encode_calls) == 1
+
+
+def test_env_vars_override_config(monkeypatch) -> None:
+    from repoctx.embeddings import EmbeddingModel
+
+    monkeypatch.setenv("REPOCTX_EMBEDDING_DEVICE", "cpu")
+    monkeypatch.setenv("REPOCTX_EMBEDDING_BATCH_SIZE", "3")
+
+    spy = _SpyModel(device="cpu")
+    cfg = EmbeddingConfig(device="mps", batch_size=32)  # config says mps/32
+    with _patch_st(spy):
+        m = EmbeddingModel(cfg)
+    assert m.batch_size == 3  # env wins over config
+    assert m._device == "cpu"
+
+
+def test_encode_query_falls_back_too() -> None:
+    from repoctx.embeddings import EmbeddingModel
+
+    spy = _SpyModel(device="mps", fail_first_n=1)
+    cfg = EmbeddingConfig(device="mps")
+    with _patch_st(spy):
+        m = EmbeddingModel(cfg)
+        v = m.encode_query("hello")
+    assert v.shape == (8,)
+    assert m._device == "cpu"
+
+
 # -- enriched chunk text -----------------------------------------------------
 
 
