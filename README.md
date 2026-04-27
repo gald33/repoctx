@@ -345,7 +345,9 @@ Embeddings are additive — the existing heuristic ranking (token overlap, doc p
 pip install "repoctx-mcp[embeddings]"
 ```
 
-This installs `sentence-transformers` and `numpy`. The model weights (~1.2 GB) are downloaded automatically on first use.
+This installs `sentence-transformers`, `numpy`, and the tree-sitter stack
+(`tree-sitter` + `tree-sitter-language-pack`) used for symbol-aware chunking.
+The model weights (~1.2 GB) are downloaded automatically on first use.
 
 ### Build the embedding index
 
@@ -353,7 +355,15 @@ This installs `sentence-transformers` and `numpy`. The model weights (~1.2 GB) a
 repoctx index --repo /path/to/repo
 ```
 
-This scans the repository, embeds every file (with enriched metadata), and writes the index to `.repoctx/embeddings/` inside the repo. Add `.repoctx/` to your `.gitignore`.
+This scans the repository, splits each file into overlapping chunks (symbol-
+aware for code: function/class/method boundaries; paragraph-aware for prose),
+embeds each chunk with metadata (`file:`, `kind:`, `module:`, `symbol:`,
+`lines:`), and writes the index to `.repoctx/embeddings/`. Add `.repoctx/` to
+your `.gitignore`.
+
+> **Upgrading from v1 indexes**: the on-disk format changed (`schema_version: 2`).
+> Old indexes raise `IndexSchemaMismatch` on load. Delete `.repoctx/embeddings/`
+> and re-run `repoctx index` once after upgrading.
 
 ### Query with hybrid retrieval
 
@@ -391,7 +401,7 @@ For each candidate file, the final score is:
 final_score = heuristic_score + embedding_weight × max(0, cosine_similarity)
 ```
 
-Default `embedding_weight` is 12.0. Files with cosine similarity above 0.3 bypass heuristic filters, so semantically relevant files surface even without keyword matches.
+Default `embedding_weight` is 12.0. Files with cosine similarity above 0.3 bypass heuristic filters, so semantically relevant files surface even without keyword matches. When a file has multiple chunks, the file's cosine similarity is the **max** over its chunks — i.e. the score from the best-matching region of the file.
 
 ### Fallback behavior
 

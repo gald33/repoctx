@@ -4,6 +4,42 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 [SemVer](https://semver.org/).
 
+## [1.0.0] — 2026-04-27
+
+First stable release. Embedding retrieval is now chunk-aware.
+
+### Changed
+- **Embeddings now operate on chunks, not whole files.** `build_index` runs a
+  symbol-aware sliding-window chunker over each file: code splits prefer
+  top-level symbol boundaries (functions, classes, methods) over blank lines
+  over single lines; prose splits prefer paragraph boundaries over sentence
+  ends. This removes the 8000-char file truncation and lets long files be
+  retrieved by their late-file content. Default chunk size: 400 target /
+  600 max tokens with 80-token overlap.
+- **Vector index schema bumped to v2** (`schema_version: 2` in
+  `index_config.json`). Old indexes raise `IndexSchemaMismatch` on load with
+  a rebuild prompt. Delete `.repoctx/embeddings/` and re-run `refresh` after
+  upgrading.
+- **`VectorIndex.similarity_scores` now max-pools per path** so multi-chunk
+  files collapse to one score (their best-matching chunk). Per-chunk scores
+  remain available via `similarity_scores_by_id`.
+
+### Added
+- **`repoctx.symbols`**: extracts function/class/method spans via Python's
+  `ast` (stdlib) and tree-sitter for JS/TS/TSX/Go/Rust/Java. Go method
+  receivers are captured and prefixed onto the method name; Rust impl-block
+  methods qualify via the lexically enclosing impl span.
+- **`repoctx.chunker`**: symbol-aware sliding-window chunker with overlap
+  and a single line-based algorithm whose split-priority hierarchy adapts
+  to code vs. prose.
+- **`VectorIndex.delete_by_path` / `add_entries`** for chunk-level
+  incremental updates; `update_file_in_index` now replaces all chunks for
+  the changed file in one bulk operation.
+
+### Dependencies
+- `[embeddings]` extra adds `tree-sitter>=0.23` and
+  `tree-sitter-language-pack>=0.7`. The base install is unchanged.
+
 ## [0.7.0] — 2026-04-27
 
 ### Added
