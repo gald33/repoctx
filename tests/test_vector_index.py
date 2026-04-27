@@ -253,7 +253,16 @@ def test_load_rejects_v1_index(tmp_path: Path) -> None:
         VectorIndex.load(d)
 
 
-def test_load_rejects_future_schema(tmp_path: Path) -> None:
+def test_save_writes_entry_and_file_counts(tmp_path: Path) -> None:
+    """index_config.json reports both entry_count (chunks) and file_count (distinct paths)."""
+    import json
+
+    # Multi-chunk index: file_a has 2 chunks, file_b has 1 → 3 entries / 2 files.
+    idx = _multi_chunk_index()
+    idx.save(tmp_path / "idx")
+    config = json.loads((tmp_path / "idx" / "index_config.json").read_text())
+    assert config["entry_count"] == 3
+    assert config["file_count"] == 2
     import json
 
     d = tmp_path / "v999"

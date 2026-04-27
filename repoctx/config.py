@@ -13,11 +13,12 @@ DOC_PRIORITY = {
 }
 
 IGNORED_DIRS = (
+    ".claude",  # Claude Code's settings + worktree checkouts (.claude/worktrees/...)
     ".git",
     ".hg",
     ".mypy_cache",
     ".repoctx",
-    ".worktrees",
+    ".worktrees",  # standalone .worktrees/ at any depth (catches non-.claude variants)
     ".svn",
     ".next",
     ".playwright-cli",

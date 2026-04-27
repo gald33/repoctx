@@ -138,11 +138,14 @@ class VectorIndex:
             metadata.append(entry_dict)
         (d / METADATA_FILE).write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
+        # Count distinct paths so callers can report "N chunks across M files".
+        unique_paths = {e.path for e in self.entries}
         config: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
             "model_name": self.model_name,
             "dimension": self.dimension,
-            "file_count": len(self.entries),
+            "entry_count": len(self.entries),  # chunk count in v2
+            "file_count": len(unique_paths),  # distinct source paths
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
         (d / INDEX_CONFIG_FILE).write_text(json.dumps(config, indent=2), encoding="utf-8")

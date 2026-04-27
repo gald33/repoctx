@@ -39,3 +39,24 @@ def test_scan_repository_ignores_worktrees_directory(tmp_path: Path) -> None:
 
     assert ".worktrees/feature-a/README.md" not in index.records
     assert "src/main.py" in index.records
+
+
+def test_scan_repository_ignores_claude_directory(tmp_path: Path) -> None:
+    """`.claude/` (Claude Code settings + worktree checkouts) is skipped wholesale.
+
+    Without this exclusion, running `repoctx index` from a repo with active
+    Claude Code worktrees double-counts every file that exists in both the
+    parent repo and `.claude/worktrees/<name>/`.
+    """
+    write_file(
+        tmp_path / ".claude" / "worktrees" / "branch-x" / "src" / "main.py",
+        "def dup():\n    return True\n",
+    )
+    write_file(tmp_path / ".claude" / "settings.json", '{"theme": "dark"}\n')
+    write_file(tmp_path / "src" / "main.py", "def run():\n    return True\n")
+
+    index = scan_repository(tmp_path)
+
+    assert ".claude/worktrees/branch-x/src/main.py" not in index.records
+    assert ".claude/settings.json" not in index.records
+    assert "src/main.py" in index.records
