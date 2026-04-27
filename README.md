@@ -245,7 +245,7 @@ repoctx install-codex           # writes AGENTS.md section + .codex/mcp.json
 
 All installers are idempotent; existing AGENTS.md content and other MCP servers are preserved. Pass `--no-scaffold` to `repoctx install` to skip the contracts/docs/examples scaffold.
 
-> **Note:** `repoctx install` does **not** build the embedding index. That's a separate step — see [Embedding-Based Retrieval](#embedding-based-retrieval-v2) below — because the embedding deps are an optional extra and the model download is ~1.2 GB.
+> **Embedding index**: `repoctx install` automatically builds the embedding index when the `[embeddings]` extras are importable (one-command setup). Pass `--no-index` to skip it, or `--with-index` to require a build (errors if extras are missing). The first build downloads the model (~1.2 GB).
 
 ### Repo conventions
 
@@ -377,9 +377,10 @@ The index command scans the repository, splits each file into overlapping chunks
 ```bash
 pip install "repoctx-mcp[embeddings]"
 cd /path/to/your/repo
-repoctx install     # MCP wiring for Claude Code / Cursor / Codex + authority scaffold
-repoctx index       # build the chunk-aware embedding index
+repoctx install     # MCP wiring + authority scaffold + embedding index (auto-built when [embeddings] is installed)
 ```
+
+Pass `--no-index` if you want to skip the embedding build and run `repoctx index` manually later.
 
 After that, your agent gets context automatically through MCP. To query from the terminal:
 
