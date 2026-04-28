@@ -4,6 +4,20 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **`semantic_search` MCP tool + `repoctx semantic-search` CLI**. Direct
+  top-K cosine-similarity lookup over the per-chunk embedding index.
+  Returns raw hits (`path`, `score`, `snippet`, `start_line`, `end_line`,
+  `enclosing_symbol`) sorted by descending similarity, with optional
+  `kind` filter (`code` / `doc` / `test` / `config`). Skips the heuristic
+  blending, scope inference, and authority bundling that `bundle` /
+  `get_task_context` / `scope` perform — for agents that want a primitive
+  "what chunks look most like this string" lookup rather than a
+  task-shaped bundle. Returns `[]` (with a log line) when no index is
+  present, so the cold-start path never errors.
+
 ## [1.0.3] — 2026-04-27
 
 Polish release. Cleaner indexing on repos with active Claude Code worktrees.
