@@ -44,6 +44,7 @@ SUBCOMMANDS = {
     "risk-report",
     "refresh",
     "detect-changes",
+    "semantic-search",
     "install",
     "install-claude-code",
     "install-cursor",
@@ -208,6 +209,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Changed file paths (defaults to git's dirty file list)",
     )
 
+    ss = sub.add_parser(
+        "semantic-search",
+        help="Top-K most similar indexed chunks for a query (raw embedding lookup)",
+    )
+    ss.add_argument("query", help="Query string to search for")
+    ss.add_argument("--repo", default=".", help="Repository root")
+    ss.add_argument(
+        "--top",
+        type=int,
+        default=10,
+        help="Maximum number of hits to return (default 10)",
+    )
+    ss.add_argument(
+        "--kind",
+        choices=("code", "doc", "test", "config"),
+        default=None,
+        help="Filter results to a single file kind",
+    )
+
     ia_all = sub.add_parser(
         "install",
         help="One-shot setup: install all harness adapters + scaffold authority layout",
@@ -325,6 +345,8 @@ def main() -> None:
         _cmd_refresh(args)
     elif cmd == "detect-changes":
         _cmd_detect_changes(args)
+    elif cmd == "semantic-search":
+        _cmd_semantic_search(args)
     elif cmd == "install":
         _cmd_install_all(args)
     elif cmd == "install-claude-code":
@@ -398,6 +420,15 @@ def _cmd_detect_changes(args: argparse.Namespace) -> None:
     from repoctx.protocol import op_detect_changes
 
     print(json.dumps(op_detect_changes(args.changed, repo_root=args.repo), indent=2))
+
+
+def _cmd_semantic_search(args: argparse.Namespace) -> None:
+    from repoctx.ops import op_semantic_search
+
+    hits = op_semantic_search(
+        args.query, repo_root=args.repo, top_k=args.top, kind=args.kind,
+    )
+    print(json.dumps(hits, indent=2))
 
 
 def _cmd_install_all(args: argparse.Namespace) -> None:

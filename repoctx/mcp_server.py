@@ -547,6 +547,34 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
         detect_changes,
     )
 
+    def semantic_search(
+        query: str,
+        top_k: int = 10,
+        kind: str | None = None,
+        repo_root: str | None = None,
+    ) -> list[dict[str, object]]:
+        from repoctx.ops import op_semantic_search
+
+        root = _resolve(repo_root)
+        return _run_op(
+            "semantic_search",
+            query,
+            root,
+            lambda: op_semantic_search(
+                query, repo_root=root, top_k=top_k, kind=kind,
+            ),
+        )
+    _register(
+        "Top-K most similar chunks for a query against the embedding index. "
+        "Returns raw per-chunk hits (path, score, snippet, line range, "
+        "enclosing_symbol) sorted by descending cosine similarity. "
+        "`kind` optionally filters to one of code/doc/test/config. Returns "
+        "an empty list if the index hasn't been built (`repoctx index`). "
+        "Use this for direct similarity lookups; for task-shaped retrieval "
+        "prefer `bundle` or `get_task_context`.",
+        semantic_search,
+    )
+
     return server
 
 
