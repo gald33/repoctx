@@ -443,6 +443,27 @@ Default `embedding_weight` is 12.0. Files with cosine similarity above 0.3 bypas
 
 If embedding dependencies are not installed or no index exists, RepoCtx silently falls back to pure heuristic retrieval. The MCP tool contract is unchanged — `get_task_context(task)` always works.
 
+### Direct embedding access
+
+For agents that want raw similarity lookups instead of task-shaped bundles, RepoCtx exposes the index directly via the `semantic_search` MCP tool and the matching CLI subcommand. This skips all of the heuristic blending, scope inference, and authority bundling that `bundle` / `get_task_context` / `scope` perform — you get the top-K most similar chunks, full stop.
+
+```bash
+repoctx semantic-search "retry policy for stripe webhooks" --top 10 --kind code
+```
+
+The MCP tool has the same shape:
+
+```python
+semantic_search(query: str, top_k: int = 10, kind: str | None = None) -> list[Hit]
+# Hit = {path, score, snippet, start_line, end_line, enclosing_symbol}
+```
+
+- Results are sorted by descending cosine similarity.
+- `kind` optionally narrows to one of `code` / `doc` / `test` / `config`.
+- If no embedding index exists yet, the tool returns `[]` (with a log line) instead of erroring — agents may not have run `repoctx index` yet.
+
+Most users should keep using `bundle` or `get_task_context`: they incorporate authority records, edit scope, the import graph, and heuristic ranking. Reach for `semantic_search` only when you specifically want a primitive "what chunks look most like this string" lookup — for example, when an agent is doing its own multi-step retrieval and needs a building block, not a packaged answer.
+
 ## Supported Files
 
 | Category | Extensions |
