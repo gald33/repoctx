@@ -545,6 +545,275 @@ def test_build_index_emits_multiple_chunks_per_long_file(tmp_path: Path) -> None
     assert sorted(m["chunk_index"] for m in long_meta) == list(range(len(long_meta)))
 
 
+def _write_two_files(repo: Path) -> tuple[Path, Path]:
+    """Create two distinct python files; both small enough for one chunk each."""
+    a = repo / "a.py"
+    b = repo / "b.py"
+    a.write_text("def alpha():\n    return 'a'\n")
+    b.write_text("def beta():\n    return 'b'\n")
+    return a, b
+
+
+def _small_chunk_cfg():
+    from repoctx.chunker import ChunkConfig
+    return ChunkConfig(target_tokens=80, max_tokens=200, overlap_tokens=0, min_tokens=10)
+
+
+def test_build_index_incremental_no_changes_skips_embedding(tmp_path: Path) -> None:
+    """A no-op rerun must not call encode_documents."""
+    pytest.importorskip("numpy")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_two_files(repo)
+
+    cfg = EmbeddingConfig()
+    chunk_cfg = _small_chunk_cfg()
+    index_dir = repo / cfg.index_dir / "embeddings"
+
+    fake_first = _FakeModel()
+    with patch("repoctx.embeddings.EmbeddingModel", return_value=fake_first):
+        from repoctx.embeddings import build_index
+
+        idx = build_index(repo, config=cfg, chunk_config=chunk_cfg)
+        idx.save(index_dir)
+
+    assert len(fake_first.encoded_texts) == 1  # full build embedded once
+
+    fake_second = _FakeModel()
+    with patch("repoctx.embeddings.EmbeddingModel", return_value=fake_second):
+        from repoctx.embeddings import build_index
+
+        idx2 = build_index(repo, config=cfg, chunk_config=chunk_cfg, incremental=True)
+
+    # No re-embedding happened.
+    assert fake_second.encoded_texts == []
+    # Same set of entries comes back, with vectors carried over.
+    assert {e.path for e in idx2.entries} == {"a.py", "b.py"}
+    assert idx2.vectors.shape == idx.vectors.shape
+    import numpy as np
+    np.testing.assert_allclose(
+        sorted_vectors_by_path(idx2),
+        sorted_vectors_by_path(idx),
+        atol=1e-6,
+    )
+
+
+def sorted_vectors_by_path(idx) -> "np.ndarray":  # type: ignore[name-defined]
+    import numpy as np
+
+    pairs = sorted(
+        zip([e.path for e in idx.entries], idx.vectors),
+        key=lambda kv: kv[0],
+    )
+    return np.array([v for _, v in pairs])
+
+
+def test_build_index_incremental_only_reembeds_changed_file(tmp_path: Path) -> None:
+    """Modifying a single file should re-embed only that file's chunks."""
+    pytest.importorskip("numpy")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    a, b = _write_two_files(repo)
+
+    cfg = EmbeddingConfig()
+    chunk_cfg = _small_chunk_cfg()
+    index_dir = repo / cfg.index_dir / "embeddings"
+
+    fake_first = _FakeModel()
+    with patch("repoctx.embeddings.EmbeddingModel", return_value=fake_first):
+        from repoctx.embeddings import build_index
+
+        idx = build_index(repo, config=cfg, chunk_config=chunk_cfg)
+        idx.save(index_dir)
+
+    # Modify only a.py.
+    a.write_text("def alpha():\n    return 'changed'\n")
+
+    fake_second = _FakeModel()
+    with patch("repoctx.embeddings.EmbeddingModel", return_value=fake_second):
+        from repoctx.embeddings import build_index
+
+        idx2 = build_index(repo, config=cfg, chunk_config=chunk_cfg, incremental=True)
+
+    # Exactly one encode call, and only a.py's chunk text(s) embedded.
+    assert len(fake_second.encoded_texts) == 1
+    payload = fake_second.encoded_texts[0]
+    assert all("file: a.py" in t for t in payload), payload
+    assert not any("file: b.py" in t for t in payload), payload
+
+    # Both files still present in the merged index.
+    assert {e.path for e in idx2.entries} == {"a.py", "b.py"}
+
+
+def test_build_index_incremental_drops_deleted_file(tmp_path: Path) -> None:
+    """Deleting a file should drop its chunks without re-embedding survivors."""
+    pytest.importorskip("numpy")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    a, b = _write_two_files(repo)
+
+    cfg = EmbeddingConfig()
+    chunk_cfg = _small_chunk_cfg()
+    index_dir = repo / cfg.index_dir / "embeddings"
+
+    fake_first = _FakeModel()
+    with patch("repoctx.embeddings.EmbeddingModel", return_value=fake_first):
+        from repoctx.embeddings import build_index
+
+        idx = build_index(repo, config=cfg, chunk_config=chunk_cfg)
+        idx.save(index_dir)
+
+    a.unlink()
+
+    fake_second = _FakeModel()
+    with patch("repoctx.embeddings.EmbeddingModel", return_value=fake_second):
+        from repoctx.embeddings import build_index
+
+        idx2 = build_index(repo, config=cfg, chunk_config=chunk_cfg, incremental=True)
+
+    # b.py is unchanged, a.py is gone — no embeddings should run.
+    assert fake_second.encoded_texts == []
+    assert {e.path for e in idx2.entries} == {"b.py"}
+
+
+def test_build_index_incremental_falls_back_on_model_name_mismatch(
+    tmp_path: Path, caplog
+) -> None:
+    """A different model_name in the on-disk index forces a full rebuild."""
+    pytest.importorskip("numpy")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_two_files(repo)
+
+    cfg = EmbeddingConfig()
+    chunk_cfg = _small_chunk_cfg()
+    index_dir = repo / cfg.index_dir / "embeddings"
+
+    fake_first = _FakeModel()
+    with patch("repoctx.embeddings.EmbeddingModel", return_value=fake_first):
+        from repoctx.embeddings import build_index
+
+        idx = build_index(repo, config=cfg, chunk_config=chunk_cfg)
+        idx.save(index_dir)
+
+    # Hand-edit the persisted model_name to simulate a config switch.
+    import json
+    cfg_path = index_dir / "index_config.json"
+    payload = json.loads(cfg_path.read_text())
+    payload["model_name"] = "some-other-model"
+    cfg_path.write_text(json.dumps(payload))
+
+    fake_second = _FakeModel()
+    import logging as _logging
+    with caplog.at_level(_logging.WARNING, logger="repoctx.embeddings"):
+        with patch("repoctx.embeddings.EmbeddingModel", return_value=fake_second):
+            from repoctx.embeddings import build_index
+
+            idx2 = build_index(repo, config=cfg, chunk_config=chunk_cfg, incremental=True)
+
+    # Full rebuild happened: every chunk re-embedded.
+    assert len(fake_second.encoded_texts) == 1
+    assert len(fake_second.encoded_texts[0]) == len(idx2.entries) == 2
+    assert any("model_name changed" in r.getMessage() for r in caplog.records)
+
+
+def test_build_index_incremental_falls_back_on_chunk_config_mismatch(
+    tmp_path: Path, caplog
+) -> None:
+    """A different chunk_config invalidates per-chunk hash keys → full rebuild."""
+    pytest.importorskip("numpy")
+    from repoctx.chunker import ChunkConfig
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_two_files(repo)
+
+    cfg = EmbeddingConfig()
+    chunk_cfg_a = ChunkConfig(
+        target_tokens=80, max_tokens=200, overlap_tokens=0, min_tokens=10,
+    )
+    chunk_cfg_b = ChunkConfig(
+        target_tokens=120, max_tokens=300, overlap_tokens=0, min_tokens=10,
+    )
+    index_dir = repo / cfg.index_dir / "embeddings"
+
+    fake_first = _FakeModel()
+    with patch("repoctx.embeddings.EmbeddingModel", return_value=fake_first):
+        from repoctx.embeddings import build_index
+
+        idx = build_index(repo, config=cfg, chunk_config=chunk_cfg_a)
+        idx.save(index_dir)
+
+    fake_second = _FakeModel()
+    import logging as _logging
+    with caplog.at_level(_logging.WARNING, logger="repoctx.embeddings"):
+        with patch("repoctx.embeddings.EmbeddingModel", return_value=fake_second):
+            from repoctx.embeddings import build_index
+
+            # Pass chunk_cfg_b to flush the persisted chunk_config.
+            idx2 = build_index(repo, config=cfg, chunk_config=chunk_cfg_b, incremental=True)
+
+    assert len(fake_second.encoded_texts) == 1
+    assert len(fake_second.encoded_texts[0]) == len(idx2.entries)
+    assert any("chunk_config changed" in r.getMessage() for r in caplog.records)
+
+
+def test_build_index_incremental_falls_back_when_no_existing_index(
+    tmp_path: Path, caplog,
+) -> None:
+    """No on-disk index → silently fall back to a full build (with a warning)."""
+    pytest.importorskip("numpy")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_two_files(repo)
+
+    cfg = EmbeddingConfig()
+    chunk_cfg = _small_chunk_cfg()
+
+    fake = _FakeModel()
+    import logging as _logging
+    with caplog.at_level(_logging.WARNING, logger="repoctx.embeddings"):
+        with patch("repoctx.embeddings.EmbeddingModel", return_value=fake):
+            from repoctx.embeddings import build_index
+
+            idx = build_index(repo, config=cfg, chunk_config=chunk_cfg, incremental=True)
+
+    assert len(fake.encoded_texts) == 1
+    assert {e.path for e in idx.entries} == {"a.py", "b.py"}
+    assert any("no existing index" in r.getMessage() for r in caplog.records)
+
+
+def test_build_index_persists_chunk_config_in_index_config(tmp_path: Path) -> None:
+    """A built index should round-trip chunk_config through save/load."""
+    pytest.importorskip("numpy")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_two_files(repo)
+
+    cfg = EmbeddingConfig()
+    chunk_cfg = _small_chunk_cfg()
+    index_dir = repo / cfg.index_dir / "embeddings"
+
+    fake = _FakeModel()
+    with patch("repoctx.embeddings.EmbeddingModel", return_value=fake):
+        from repoctx.embeddings import build_index
+
+        idx = build_index(repo, config=cfg, chunk_config=chunk_cfg)
+        idx.save(index_dir)
+
+    import json
+    payload = json.loads((index_dir / "index_config.json").read_text())
+    assert payload["chunk_config"] == {
+        "target_tokens": chunk_cfg.target_tokens,
+        "max_tokens": chunk_cfg.max_tokens,
+        "overlap_tokens": chunk_cfg.overlap_tokens,
+        "min_tokens": chunk_cfg.min_tokens,
+    }
+    from repoctx.vector_index import VectorIndex
+    reloaded = VectorIndex.load(index_dir)
+    assert reloaded.chunk_config == payload["chunk_config"]
+
+
 def test_update_file_in_index_replaces_all_chunks(tmp_path: Path) -> None:
     pytest.importorskip("numpy")
     repo = tmp_path / "repo"

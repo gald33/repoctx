@@ -57,6 +57,10 @@ class VectorIndex:
     entries: list[IndexEntry] = field(default_factory=list)
     model_name: str = ""
     dimension: int = 0
+    # Chunker settings used when this index was built. Persisted to
+    # index_config.json so incremental rebuilds can refuse to splice when the
+    # chunker config changed (which would invalidate per-chunk hash keys).
+    chunk_config: dict[str, Any] = field(default_factory=dict)
 
     def __len__(self) -> int:
         return len(self.entries)
@@ -148,6 +152,8 @@ class VectorIndex:
             "file_count": len(unique_paths),  # distinct source paths
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
+        if self.chunk_config:
+            config["chunk_config"] = self.chunk_config
         (d / INDEX_CONFIG_FILE).write_text(json.dumps(config, indent=2), encoding="utf-8")
         logger.info("Saved vector index (%d entries) → %s", len(self.entries), d)
 
@@ -190,6 +196,7 @@ class VectorIndex:
             entries=entries,
             model_name=config.get("model_name", ""),
             dimension=config.get("dimension", 0),
+            chunk_config=config.get("chunk_config", {}) or {},
         )
 
     # ---- single-entry mutation ----------------------------------------------
