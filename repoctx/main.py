@@ -113,6 +113,16 @@ def build_parser() -> argparse.ArgumentParser:
     idx = sub.add_parser("index", help="Build the embedding index for a repo")
     idx.add_argument("--repo", default=".", help="Repository root")
     idx.add_argument("--verbose", action="store_true")
+    idx.add_argument(
+        "--incremental",
+        action="store_true",
+        help=(
+            "Only re-embed chunks whose content_hash changed since the previous "
+            "index. Falls back to a full rebuild if the existing index is "
+            "missing, schema-incompatible, or built with a different model or "
+            "chunker config."
+        ),
+    )
 
     # -- update ---------------------------------------------------------------
     upd = sub.add_parser("update", help="Re-embed a single file")
@@ -565,7 +575,7 @@ def _cmd_query(args: argparse.Namespace) -> None:
 
 
 def _cmd_index(args: argparse.Namespace) -> None:
-    _build_and_save_index(Path(args.repo))
+    _build_and_save_index(Path(args.repo), incremental=getattr(args, "incremental", False))
 
 
 def _cmd_rebuild(args: argparse.Namespace) -> None:
@@ -609,7 +619,7 @@ def _cmd_experiment(args: argparse.Namespace) -> None:
 # -- helpers -------------------------------------------------------------------
 
 
-def _build_and_save_index(repo: Path) -> None:
+def _build_and_save_index(repo: Path, *, incremental: bool = False) -> None:
     try:
         from repoctx.embeddings import build_index
     except ImportError:
@@ -618,14 +628,15 @@ def _build_and_save_index(repo: Path) -> None:
 
     repo = repo.resolve()
     try:
-        record_store = build_index(repo)
+        record_store = build_index(repo, incremental=incremental)
     except ImportError as exc:
         print(f"{exc}", file=sys.stderr)
         raise SystemExit(1)
     emb_dir = repo / DEFAULT_EMBEDDING_CONFIG.index_dir / "embeddings"
     record_store.save(emb_dir)
     unique_files = len({e.path for e in record_store.entries})
-    print(f"Indexed {len(record_store)} chunks across {unique_files} files → {emb_dir}")
+    mode = "incrementally" if incremental else "fully"
+    print(f"Indexed {len(record_store)} chunks across {unique_files} files ({mode}) → {emb_dir}")
 
 
 def _cmd_experiment_start(args: argparse.Namespace) -> None:

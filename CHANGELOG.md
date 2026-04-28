@@ -7,6 +7,21 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 ## [Unreleased]
 
 ### Added
+- **`repoctx index --incremental`**. Opt-in flag that re-embeds only chunks
+  whose `content_hash` differs from the existing on-disk index. Unchanged
+  chunks reuse their persisted vectors; chunks with changed text are
+  re-embedded; chunks (and files) that disappeared in the new scan are
+  dropped. New `incremental: bool = False` parameter on
+  `repoctx.embeddings.build_index` exposes the same behaviour to library
+  callers. Default behaviour is unchanged (full rebuild) — promotion to
+  default is deferred to a later minor release.
+- **Compatibility guard**. `index_config.json` now records the
+  `chunk_config` used to build the index (target/max/overlap/min tokens).
+  Incremental rebuilds refuse to splice when the on-disk `model_name` or
+  `chunk_config` differ from the current run, falling back to a full
+  rebuild with a warning. Indices missing this metadata (built before this
+  release) also trigger fallback. Old indices still load fine — the field
+  is only consulted by the incremental path.
 - **`semantic_search` MCP tool + `repoctx semantic-search` CLI**. Direct
   top-K cosine-similarity lookup over the per-chunk embedding index.
   Returns raw hits (`path`, `score`, `snippet`, `start_line`, `end_line`,

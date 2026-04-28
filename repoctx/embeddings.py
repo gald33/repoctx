@@ -368,26 +368,91 @@ def _chunk_to_entry(record: FileRecord, chunk: Chunk):
     )
 
 
+def _chunk_config_to_dict(cfg: ChunkConfig) -> dict[str, int]:
+    """Serializable view of a ChunkConfig (for index_config.json)."""
+    return {
+        "target_tokens": cfg.target_tokens,
+        "max_tokens": cfg.max_tokens,
+        "overlap_tokens": cfg.overlap_tokens,
+        "min_tokens": cfg.min_tokens,
+    }
+
+
+def _load_compatible_existing_index(
+    root: Path,
+    config: EmbeddingConfig,
+    chunk_cfg: ChunkConfig,
+) -> VectorIndex | None:
+    """Load the on-disk index iff it's compatible for an incremental rebuild.
+
+    Returns None (and logs a warning) on missing index, schema mismatch,
+    different model_name, missing or different chunk_config — all cases where
+    splicing previously-embedded vectors would be unsafe.
+    """
+    from repoctx.vector_index import IndexSchemaMismatch, VectorIndex
+
+    index_dir = root / config.index_dir / "embeddings"
+    try:
+        existing = VectorIndex.load(index_dir)
+    except FileNotFoundError as exc:
+        logger.warning("Incremental fallback: no existing index (%s)", exc)
+        return None
+    except IndexSchemaMismatch as exc:
+        logger.warning("Incremental fallback: schema mismatch (%s)", exc)
+        return None
+
+    if existing.model_name != config.model_name:
+        logger.warning(
+            "Incremental fallback: model_name changed (%r → %r); doing full rebuild",
+            existing.model_name, config.model_name,
+        )
+        return None
+    desired = _chunk_config_to_dict(chunk_cfg)
+    if not existing.chunk_config:
+        logger.warning(
+            "Incremental fallback: existing index has no recorded chunk_config; "
+            "doing full rebuild"
+        )
+        return None
+    if existing.chunk_config != desired:
+        logger.warning(
+            "Incremental fallback: chunk_config changed (%s → %s); doing full rebuild",
+            existing.chunk_config, desired,
+        )
+        return None
+    return existing
+
+
 def build_index(
     repo_root: str | Path,
     config: EmbeddingConfig = DEFAULT_EMBEDDING_CONFIG,
     chunk_config: ChunkConfig | None = None,
+    incremental: bool = False,
 ) -> VectorIndex:
     """Scan a repository, chunk every file, embed each chunk, and return a VectorIndex.
 
     Each file produces one or more chunks (symbol-aware sliding window for code,
     paragraph-aware for prose). Caller persists with ``index.save(…)``.
+
+    With ``incremental=True``, an existing on-disk index is loaded and only
+    chunks whose ``content_hash`` differs (or whose ``(path, chunk_index)``
+    didn't exist before) are re-embedded. Chunks present in the old index but
+    no longer produced by the current scan are dropped. If the old index is
+    missing, schema-incompatible, or built with a different model/chunker, we
+    log a warning and fall back to a full rebuild.
     """
     from repoctx.scanner import scan_repository
     from repoctx.vector_index import VectorIndex
 
     chunk_cfg = chunk_config or ChunkConfig()
     root = Path(repo_root).resolve()
-    repo_index = scan_repository(root)
-    model = EmbeddingModel(config)
 
+    existing: VectorIndex | None = None
+    if incremental:
+        existing = _load_compatible_existing_index(root, config, chunk_cfg)
+
+    repo_index = scan_repository(root)
     records: list[FileRecord] = list(repo_index.records.values())
-    texts: list[str] = []
     entries_proto: list[tuple[FileRecord, Chunk]] = []
     skipped_empty = 0
     for record in records:
@@ -396,12 +461,32 @@ def build_index(
             skipped_empty += 1
             continue
         for chunk in chunks:
-            texts.append(build_enriched_chunk_text(record, chunk))
             entries_proto.append((record, chunk))
+
+    if existing is None:
+        return _full_build(
+            entries_proto, config, chunk_cfg, len(records), skipped_empty,
+        )
+    return _incremental_build(
+        existing, entries_proto, config, chunk_cfg,
+    )
+
+
+def _full_build(
+    entries_proto: list[tuple[FileRecord, Chunk]],
+    config: EmbeddingConfig,
+    chunk_cfg: ChunkConfig,
+    total_records: int,
+    skipped_empty: int,
+) -> VectorIndex:
+    from repoctx.vector_index import VectorIndex
+
+    model = EmbeddingModel(config)
+    texts = [build_enriched_chunk_text(record, chunk) for record, chunk in entries_proto]
 
     logger.info(
         "Embedding %d chunks across %d files (%d empty skipped) …",
-        len(texts), len(records) - skipped_empty, skipped_empty,
+        len(texts), total_records - skipped_empty, skipped_empty,
     )
     started = perf_counter()
     vectors = model.encode_documents(texts)
@@ -414,6 +499,83 @@ def build_index(
         entries=entries,
         model_name=config.model_name,
         dimension=model.dimension,
+        chunk_config=_chunk_config_to_dict(chunk_cfg),
+    )
+
+
+def _incremental_build(
+    existing: VectorIndex,
+    entries_proto: list[tuple[FileRecord, Chunk]],
+    config: EmbeddingConfig,
+    chunk_cfg: ChunkConfig,
+) -> VectorIndex:
+    """Re-embed only changed/new chunks; reuse vectors for unchanged ones."""
+    from repoctx.vector_index import VectorIndex
+
+    # Build (path, chunk_index) → (row_index, content_hash) lookup over old.
+    by_key: dict[tuple[str, int], tuple[int, str]] = {}
+    for i, e in enumerate(existing.entries):
+        ci = e.metadata.get("chunk_index")
+        if ci is None:
+            continue
+        by_key[(e.path, ci)] = (i, e.content_hash)
+
+    final_entries = [_chunk_to_entry(rec, ch) for rec, ch in entries_proto]
+    n = len(final_entries)
+    reuse_pairs: list[tuple[int, int]] = []  # (final_pos, old_row_index)
+    to_embed: list[tuple[int, FileRecord, Chunk]] = []
+    n_unchanged = n_changed = n_new = 0
+    for pos, ((rec, chunk), entry) in enumerate(zip(entries_proto, final_entries)):
+        key = (rec.path, chunk.chunk_index)
+        prev = by_key.get(key)
+        if prev is not None and prev[1] == entry.content_hash:
+            reuse_pairs.append((pos, prev[0]))
+            n_unchanged += 1
+        else:
+            to_embed.append((pos, rec, chunk))
+            if prev is None:
+                n_new += 1
+            else:
+                n_changed += 1
+
+    n_removed = len(existing.entries) - n_unchanged - n_changed
+    logger.info(
+        "Incremental rebuild: %d unchanged, %d changed, %d new, %d removed "
+        "(out of %d existing chunks)",
+        n_unchanged, n_changed, n_new, n_removed, len(existing.entries),
+    )
+
+    dim = existing.dimension
+    if n == 0:
+        return VectorIndex(
+            vectors=_np.empty((0, dim), dtype=_np.float32),
+            entries=[],
+            model_name=config.model_name,
+            dimension=dim,
+            chunk_config=_chunk_config_to_dict(chunk_cfg),
+        )
+
+    if to_embed:
+        model = EmbeddingModel(config)
+        dim = model.dimension
+    vectors = _np.zeros((n, dim), dtype=_np.float32)
+    for final_pos, old_row in reuse_pairs:
+        vectors[final_pos] = existing.vectors[old_row]
+    if to_embed:
+        texts = [build_enriched_chunk_text(rec, ch) for _, rec, ch in to_embed]
+        started = perf_counter()
+        new_vecs = model.encode_documents(texts, show_progress=len(texts) > 32)
+        elapsed = perf_counter() - started
+        logger.info("Embedded %d chunks in %.1f s (incremental)", len(texts), elapsed)
+        for (final_pos, _, _), v in zip(to_embed, new_vecs):
+            vectors[final_pos] = v
+
+    return VectorIndex(
+        vectors=vectors,
+        entries=final_entries,
+        model_name=config.model_name,
+        dimension=dim,
+        chunk_config=_chunk_config_to_dict(chunk_cfg),
     )
 
 
