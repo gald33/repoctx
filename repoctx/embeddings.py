@@ -7,11 +7,14 @@ All imports are conditional so repoctx works without embedding dependencies.
 from __future__ import annotations
 
 import hashlib
+import json as _json
 import logging
 import os
+import time
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from time import perf_counter
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterator
 
 from repoctx.chunker import Chunk, ChunkConfig, chunk_record
 from repoctx.config import DEFAULT_EMBEDDING_CONFIG, EmbeddingConfig
@@ -331,10 +334,16 @@ def try_load_retriever(
         logger.debug("Embedding dependencies not installed – skipping")
         return None
     try:
-        from repoctx.vector_index import VectorIndex
+        from repoctx.vector_index import IndexSchemaMismatch, VectorIndex
 
         index_dir = Path(repo_root).resolve() / config.index_dir / "embeddings"
-        index = VectorIndex.load(index_dir)
+        try:
+            index = VectorIndex.load(index_dir)
+        except IndexSchemaMismatch as exc:
+            # Surface the migration instructions at WARNING level so users see
+            # them without --verbose; falling back to heuristic-only retrieval.
+            logger.warning("Embedding index outdated, falling back to heuristics:\n%s", exc)
+            return None
         model = EmbeddingModel(config)
         return EmbeddingRetriever(model=model, index=index)
     except Exception as exc:
@@ -619,3 +628,220 @@ def update_file_in_index(
     logger.info(
         "Updated %s: replaced %d chunks with %d new", rel_path, removed, len(chunks),
     )
+
+
+# ---------------------------------------------------------------------------
+# Debounced update queue
+#
+# Complements `repoctx index --incremental` (bulk catch-up keyed by
+# content_hash diff). The queue handles live per-edit upkeep:
+# `repoctx update <file>` appends to a JSONL queue under
+# `<repo>/.repoctx/embeddings/.pending` and auto-flushes when the queue
+# reaches `EmbeddingConfig.debounce_n` unique paths or the oldest entry is
+# older than `debounce_max_age_seconds`. `bundle` / `scope` also flush
+# pending updates on the read side so retrieval never sees stale vectors
+# even if the writer forgot to flush.
+# ---------------------------------------------------------------------------
+
+
+def _embeddings_dir(repo_root: str | Path, config: EmbeddingConfig) -> Path:
+    return Path(repo_root).resolve() / config.index_dir / "embeddings"
+
+
+def _pending_path(repo_root: str | Path, config: EmbeddingConfig) -> Path:
+    return _embeddings_dir(repo_root, config) / config.queue_filename
+
+
+def _flushing_path(repo_root: str | Path, config: EmbeddingConfig) -> Path:
+    return _embeddings_dir(repo_root, config) / (config.queue_filename + ".flushing")
+
+
+def _lock_path(repo_root: str | Path, config: EmbeddingConfig) -> Path:
+    return _embeddings_dir(repo_root, config) / (config.queue_filename + ".lock")
+
+
+@contextmanager
+def _queue_lock(repo_root: str | Path, config: EmbeddingConfig) -> Iterator[None]:
+    """Cross-process lock around queue mutation. POSIX flock; degrades gracefully."""
+    lock_file = _lock_path(repo_root, config)
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(lock_file, "a+")
+    try:
+        try:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        except (ImportError, OSError):
+            pass  # Best-effort on Windows / odd filesystems.
+        yield
+    finally:
+        try:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        except (ImportError, OSError):
+            pass
+        fh.close()
+
+
+def _read_queue(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    entries: list[dict] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = _json.loads(line)
+        except _json.JSONDecodeError:
+            continue
+        if isinstance(entry, dict) and "path" in entry:
+            entries.append(entry)
+    return entries
+
+
+def _dedupe_keep_latest(entries: list[dict]) -> list[dict]:
+    by_path: dict[str, dict] = {}
+    for e in entries:
+        prev = by_path.get(e["path"])
+        if prev is None or float(e.get("queued_at", 0)) >= float(prev.get("queued_at", 0)):
+            by_path[e["path"]] = e
+    return sorted(by_path.values(), key=lambda e: float(e.get("queued_at", 0)))
+
+
+def enqueue_for_update(
+    file_path: str,
+    repo_root: str | Path = ".",
+    config: EmbeddingConfig = DEFAULT_EMBEDDING_CONFIG,
+) -> dict:
+    """Append *file_path* to the pending queue and possibly auto-flush.
+
+    Returns ``{"queued": path, "flushed": int}``. ``flushed`` is the number of
+    files re-embedded as part of an automatic flush triggered by this call (0
+    if the threshold wasn't reached).
+    """
+    rel = PurePosixPath(file_path).as_posix()
+    pending = _pending_path(repo_root, config)
+    pending.parent.mkdir(parents=True, exist_ok=True)
+
+    with _queue_lock(repo_root, config):
+        # Recover any half-flushed batch from a previous crash.
+        flushing = _flushing_path(repo_root, config)
+        if flushing.exists():
+            existing = pending.read_text(encoding="utf-8") if pending.exists() else ""
+            with pending.open("a", encoding="utf-8") as fh:
+                if existing and not existing.endswith("\n"):
+                    fh.write("\n")
+                fh.write(flushing.read_text(encoding="utf-8"))
+            flushing.unlink()
+
+        with pending.open("a", encoding="utf-8") as fh:
+            fh.write(_json.dumps({"path": rel, "queued_at": time.time()}) + "\n")
+
+    flushed = 0
+    if config.auto_flush and _should_flush(repo_root, config):
+        flushed = flush_pending(repo_root, config)
+
+    return {"queued": rel, "flushed": flushed}
+
+
+def _should_flush(repo_root: str | Path, config: EmbeddingConfig) -> bool:
+    pending = _pending_path(repo_root, config)
+    entries = _read_queue(pending)
+    if not entries:
+        return False
+    if len(_dedupe_keep_latest(entries)) >= config.debounce_n:
+        return True
+    oldest = min(float(e.get("queued_at", time.time())) for e in entries)
+    return (time.time() - oldest) >= config.debounce_max_age_seconds
+
+
+def pending_status(
+    repo_root: str | Path = ".",
+    config: EmbeddingConfig = DEFAULT_EMBEDDING_CONFIG,
+) -> dict:
+    pending = _pending_path(repo_root, config)
+    entries = _dedupe_keep_latest(_read_queue(pending))
+    if not entries:
+        return {"count": 0, "oldest_age_seconds": 0.0, "paths": []}
+    oldest = min(float(e.get("queued_at", time.time())) for e in entries)
+    return {
+        "count": len(entries),
+        "oldest_age_seconds": max(0.0, time.time() - oldest),
+        "paths": [e["path"] for e in entries[:10]],
+    }
+
+
+def flush_pending(
+    repo_root: str | Path = ".",
+    config: EmbeddingConfig = DEFAULT_EMBEDDING_CONFIG,
+) -> int:
+    """Embed every queued file. Returns the number of files re-embedded.
+
+    Atomically renames the queue to a sidecar before processing so concurrent
+    writers can keep enqueueing during the embed pass. On failure mid-batch,
+    surviving entries are merged back into ``.pending`` for the next call.
+    """
+    pending = _pending_path(repo_root, config)
+    flushing = _flushing_path(repo_root, config)
+
+    with _queue_lock(repo_root, config):
+        if not pending.exists() or pending.stat().st_size == 0:
+            # Nothing new — but if a prior crash left a flushing file, pick it up.
+            if not flushing.exists() or flushing.stat().st_size == 0:
+                return 0
+        else:
+            if flushing.exists():
+                # Merge any prior crash residue into our new batch.
+                merged = flushing.read_text(encoding="utf-8") + pending.read_text(encoding="utf-8")
+                flushing.write_text(merged, encoding="utf-8")
+                pending.unlink()
+            else:
+                os.replace(pending, flushing)
+
+    entries = _dedupe_keep_latest(_read_queue(flushing))
+    if not entries:
+        flushing.unlink(missing_ok=True)
+        return 0
+
+    survivors: list[dict] = []
+    embedded = 0
+    for entry in entries:
+        try:
+            update_file_in_index(entry["path"], repo_root=repo_root, config=config)
+            embedded += 1
+        except FileNotFoundError:
+            logger.info("Dropping queued path no longer in repo: %s", entry["path"])
+        except Exception as exc:  # noqa: BLE001 — re-queue and continue
+            logger.warning("Failed to embed %s: %s — re-queuing", entry["path"], exc)
+            survivors.append(entry)
+
+    with _queue_lock(repo_root, config):
+        if survivors:
+            with pending.open("a", encoding="utf-8") as fh:
+                for s in survivors:
+                    fh.write(_json.dumps(s) + "\n")
+        flushing.unlink(missing_ok=True)
+
+    logger.info("Flushed %d embedding update(s)", embedded)
+    return embedded
+
+
+def maybe_flush_on_read(
+    repo_root: str | Path = ".",
+    config: EmbeddingConfig = DEFAULT_EMBEDDING_CONFIG,
+) -> int:
+    """Flush queued updates ahead of a read so retrieval sees fresh vectors.
+
+    Cheap when the queue is empty; silently no-ops if embeddings aren't
+    installed or the persisted index is on an older schema (caller should
+    rebuild via ``repoctx rebuild``). Always safe to call.
+    """
+    if not HAS_EMBEDDINGS or not config.auto_flush:
+        return 0
+    try:
+        if not _pending_path(repo_root, config).exists():
+            return 0
+        return flush_pending(repo_root, config)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("maybe_flush_on_read suppressed error: %s", exc)
+        return 0

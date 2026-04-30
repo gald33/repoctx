@@ -125,9 +125,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # -- update ---------------------------------------------------------------
-    upd = sub.add_parser("update", help="Re-embed a single file")
-    upd.add_argument("file", help="Relative path of the file to update")
+    upd = sub.add_parser(
+        "update",
+        help="Queue a file for re-embedding (debounced; see --immediate / --flush)",
+    )
+    upd.add_argument(
+        "file",
+        nargs="?",
+        help="Relative path to queue. Omit when using --flush, --status, or --from-claude-hook.",
+    )
     upd.add_argument("--repo", default=".", help="Repository root")
+    upd.add_argument(
+        "--immediate",
+        action="store_true",
+        help="Embed synchronously, bypassing the debounce queue",
+    )
+    upd.add_argument(
+        "--flush",
+        action="store_true",
+        help="Flush every queued path now (no file argument needed)",
+    )
+    upd.add_argument(
+        "--status",
+        action="store_true",
+        help="Print queue status as JSON and exit",
+    )
+    upd.add_argument(
+        "--from-claude-hook",
+        action="store_true",
+        help="Read Claude Code PostToolUse JSON from stdin and queue the edited file",
+    )
     upd.add_argument("--verbose", action="store_true")
 
     # -- rebuild --------------------------------------------------------------
@@ -591,16 +618,76 @@ def _cmd_rebuild(args: argparse.Namespace) -> None:
 
 def _cmd_update(args: argparse.Namespace) -> None:
     try:
-        from repoctx.embeddings import update_file_in_index
+        from repoctx.embeddings import (
+            enqueue_for_update,
+            flush_pending,
+            pending_status,
+            update_file_in_index,
+        )
     except ImportError:
         print("Embedding dependencies not installed. Run: pip install 'repoctx-mcp[embeddings]'", file=sys.stderr)
         raise SystemExit(1)
+
+    repo = Path(args.repo)
+
+    if args.status:
+        print(json.dumps(pending_status(repo_root=repo), indent=2))
+        return
+
+    if args.flush:
+        n = flush_pending(repo_root=repo)
+        print(f"Flushed {n} pending embedding update(s)")
+        return
+
+    if args.from_claude_hook:
+        try:
+            payload = json.load(sys.stdin)
+        except json.JSONDecodeError as exc:
+            print(f"Invalid JSON on stdin: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        target = _extract_claude_hook_path(payload)
+        if not target:
+            return
+        result = enqueue_for_update(target, repo_root=repo)
+        if result.get("flushed"):
+            print(f"Queued {result['queued']} (auto-flushed {result['flushed']} files)")
+        else:
+            print(f"Queued {result['queued']}")
+        return
+
+    if not args.file:
+        print("update: file argument required (or pass --flush / --status / --from-claude-hook)", file=sys.stderr)
+        raise SystemExit(2)
+
     try:
-        update_file_in_index(args.file, repo_root=Path(args.repo))
+        if args.immediate:
+            update_file_in_index(args.file, repo_root=repo)
+            print(f"Updated embedding for {args.file}")
+        else:
+            result = enqueue_for_update(args.file, repo_root=repo)
+            if result.get("flushed"):
+                print(f"Queued {result['queued']} (auto-flushed {result['flushed']} files)")
+            else:
+                print(f"Queued {result['queued']}")
     except (ImportError, FileNotFoundError) as exc:
         print(f"{exc}", file=sys.stderr)
         raise SystemExit(1)
-    print(f"Updated embedding for {args.file}")
+
+
+def _extract_claude_hook_path(payload: dict) -> str | None:
+    """Pull the edited file path out of a Claude Code PostToolUse hook payload.
+
+    Claude Code passes JSON like ``{"tool_name": "Edit", "tool_input": {"file_path": "..."}}``
+    on stdin. We accept a few shape variants defensively so the hook keeps
+    working across hook-schema revisions.
+    """
+    tool_input = payload.get("tool_input") or payload.get("toolInput") or {}
+    for key in ("file_path", "filePath", "path"):
+        val = tool_input.get(key)
+        if isinstance(val, str) and val.strip():
+            return val
+    val = payload.get("file_path") or payload.get("path")
+    return val if isinstance(val, str) and val.strip() else None
 
 
 def _cmd_experiment(args: argparse.Namespace) -> None:

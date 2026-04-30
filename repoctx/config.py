@@ -122,6 +122,14 @@ class EmbeddingConfig:
     # (fp16 on CPU is slower than fp32 in PyTorch). "fp32" / "fp16" pin the
     # choice. Override via REPOCTX_EMBEDDING_DTYPE.
     dtype: str = "auto"
+    # Auto-flush queue: harness hooks / agents append edits via `repoctx update`,
+    # which embeds in batches once a threshold is reached. Complements
+    # `repoctx index --incremental` (bulk catch-up); the queue handles live
+    # per-edit upkeep so the index doesn't drift between bulk runs.
+    auto_flush: bool = True
+    debounce_n: int = 10
+    debounce_max_age_seconds: int = 300
+    queue_filename: str = ".pending"
 
 
 DEFAULT_EMBEDDING_CONFIG = EmbeddingConfig()

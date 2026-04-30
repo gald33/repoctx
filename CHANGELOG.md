@@ -4,9 +4,58 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [1.1.0] — 2026-04-30
 
-### Added
+This release pairs the new live embedding-update queue with the
+incremental rebuild work that landed on `main` between 1.0.3 and 1.1.0:
+together they cover both ends of "keep the index current" — per-edit
+upkeep via the queue, bulk catch-up via `index --incremental`.
+
+### Added — Debounced embedding-update queue
+- `repoctx update <file>` no longer embeds synchronously. It appends to
+  `.repoctx/embeddings/.pending` (JSONL, file-locked) and auto-flushes
+  once the queue reaches `debounce_n` unique paths **or** the oldest
+  entry is older than `debounce_max_age_seconds` — whichever hits first.
+  Defaults: 10 paths / 300 s.
+- Concurrent enqueueing is safe via `flock`; the queue is deduped by
+  path on flush; partial-flush failures re-queue survivors; a flush
+  killed mid-batch leaves a `.pending.flushing` sidecar that's recovered
+  on the next call.
+- New `repoctx update` flags: `--immediate` (bypass queue, embed now),
+  `--flush` (drain the queue), `--status` (print depth + oldest age as
+  JSON), `--from-claude-hook` (parse the Claude Code PostToolUse stdin
+  JSON and queue the edited file).
+- New `EmbeddingConfig` fields: `auto_flush` (default `True`),
+  `debounce_n` (10), `debounce_max_age_seconds` (300), `queue_filename`
+  (`.pending`).
+
+### Added — Automated upkeep across harnesses
+- **Claude Code PostToolUse hook**: `repoctx install` and
+  `install-claude-code` now write `.claude/settings.json` with a hook
+  that runs `repoctx update --from-claude-hook` after every `Edit |
+  Write | MultiEdit`. Idempotent — existing hooks are preserved and the
+  repoctx entry is detected on re-install.
+- **Harness-agnostic instruction**: the `AGENTS.md` "Ground truth
+  (repoctx)" section now includes an `### Embedding upkeep` blurb so
+  agents on Cursor / Codex / any other AGENTS.md-driven harness have a
+  written rule to call `repoctx update <path>` after every edit even
+  when hooks aren't available. The blurb also tells agents to prefer
+  `repoctx index --incremental` for bulk catch-up.
+
+### Added — Read-side auto-flush
+- `op_bundle` and `op_scope` call `maybe_flush_on_read` before building
+  the bundle so retrieval never reads a stale index even if the writer
+  forgot to flush. No-op when the queue is empty.
+
+### Changed — Schema-mismatch UX
+- The vector-index loader now distinguishes a clear "outdated format"
+  error from generic load failures and surfaces a friendly migration
+  message at WARNING level (no `--verbose` needed). The
+  `IndexSchemaMismatch` text spells out both migration paths
+  (`repoctx rebuild` for clean restart, `repoctx index --incremental`
+  for diff-only re-embed) and reassures that no source data is lost.
+
+### Added — `repoctx index --incremental` (carried forward from `main`)
 - **`repoctx index --incremental`**. Opt-in flag that re-embeds only chunks
   whose `content_hash` differs from the existing on-disk index. Unchanged
   chunks reuse their persisted vectors; chunks with changed text are

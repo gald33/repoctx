@@ -176,8 +176,23 @@ class VectorIndex:
         version = config.get("schema_version", 1)
         if version != SCHEMA_VERSION:
             raise IndexSchemaMismatch(
-                f"Vector index at {d} is schema v{version}; this build expects "
-                f"v{SCHEMA_VERSION}. Rebuild with `repoctx refresh --rebuild-index`."
+                f"Vector index at {d} uses an older format (schema v{version}); "
+                f"this build of repoctx (>= 1.1.0) requires schema v{SCHEMA_VERSION} "
+                f"because the index moved from one row per file to one row per "
+                f"symbol-aware chunk for better recall.\n"
+                f"\n"
+                f"To migrate, rebuild the index from scratch:\n"
+                f"  repoctx rebuild --repo <path>\n"
+                f"\n"
+                f"Or, if you'd rather only re-embed what changed and have a v2 "
+                f"index already:\n"
+                f"  repoctx index --incremental --repo <path>\n"
+                f"\n"
+                f"This wipes {d} (rebuild) or splices it (incremental) and "
+                f"re-embeds the repo. No source data is lost — the index is a "
+                f"derived cache. While the old index lingers, embedding-based "
+                f"retrieval is disabled and repoctx falls back to pure heuristic "
+                f"scoring."
             )
 
         entries = [

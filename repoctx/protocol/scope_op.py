@@ -9,6 +9,11 @@ from repoctx.bundle import build_bundle
 
 
 def op_scope(task: str, repo_root: str | Path = ".") -> dict[str, Any]:
+    try:
+        from repoctx.embeddings import maybe_flush_on_read
+        maybe_flush_on_read(repo_root=repo_root)
+    except ImportError:
+        pass
     bundle = build_bundle(task, repo_root=repo_root)
     return {
         "schema_version": "repoctx-bundle/1",
