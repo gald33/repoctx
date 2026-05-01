@@ -4,6 +4,39 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 [SemVer](https://semver.org/).
 
+## [1.1.1] — 2026-05-01
+
+### Fixed — `bundle()` / `get_task_context()` now use the embedding index
+
+Prior to 1.1.1, `bundle()` ranked `relevant_code` by lexical token
+overlap even when an embedding index was present, and `get_task_context`
+treated the cosine score as a small additive boost that the lexical
+heuristic almost always swamped (a 3-token name overlap = 18.0 already
+beat a perfect cosine ×12.0 weight). Building the index improved
+`semantic_search()` only — the recommended task-shaped entry points
+were strictly worse than the raw similarity tool.
+
+- `op_bundle` now loads the persisted retriever (`try_load_retriever`)
+  and passes `query_scores(task)` into `build_bundle`. The MCP `bundle`
+  tool inherits this — no client-side change needed.
+- When embedding scores are present, cosine is the primary signal and
+  the lexical heuristic is squashed via `tanh(heuristic / 12)` ×
+  `lexical_tiebreak_weight` (default 0.05) so it can only break ties
+  between near-equal cosines.
+- `RankedPath.reason` now reports the contributing signal:
+  `"Semantic similarity 0.66; tokens: telegram, debug"`,
+  `"Semantic similarity 0.66"`, or the existing
+  `"Matches task tokens: …"` fallback.
+- `bundle.metrics["ranker"]` is now `"embeddings"` or `"lexical"` so
+  callers can verify which path ran.
+- `.uv-cache` added to `IGNORED_DIRS`. Existing indexes still contain
+  these chunks until the next `repoctx index` rebuild, but the new
+  primary-cosine ranker deprioritizes them on content anyway.
+- New config knob: `RepoCtxConfig.lexical_tiebreak_weight: float = 0.05`.
+
+No rebuild required: the fix takes effect immediately against any
+schema-compatible existing index.
+
 ## [1.1.0] — 2026-04-30
 
 This release pairs the new live embedding-update queue with the

@@ -60,6 +60,16 @@ def test_bundle_scope_has_allowed_and_protected(repo: Path) -> None:
     assert any("contracts" in p for p in scope.protected_paths)
 
 
+def test_bundle_metrics_report_ranker_mode(repo: Path) -> None:
+    bundle = build_bundle("tokens", repo_root=repo)
+    assert bundle.metrics["ranker"] == "lexical"
+
+    bundle_emb = build_bundle(
+        "tokens", repo_root=repo, embedding_scores={"app/tokens.py": 0.9}
+    )
+    assert bundle_emb.metrics["ranker"] == "embeddings"
+
+
 def test_serialization_bounds_excerpts(repo: Path) -> None:
     big = "x" * 5000
     (repo / "contracts" / "big.md").write_text(f"# Big\n\n{big}\n")
