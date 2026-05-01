@@ -15,6 +15,10 @@ def test_scan_repository_detects_high_value_docs(tmp_path: Path) -> None:
     write_file(tmp_path / "packages" / "billing" / "README.md", "# Billing package\n")
     write_file(tmp_path / "src" / "billing" / "retry.ts", "export const retry = true;\n")
     write_file(tmp_path / "node_modules" / "ignored.ts", "export const ignored = true;\n")
+    write_file(
+        tmp_path / ".uv-cache" / "archive-v0" / "pkg" / "metadata.py",
+        "# build cache\n",
+    )
 
     index = scan_repository(tmp_path)
 
@@ -25,6 +29,7 @@ def test_scan_repository_detects_high_value_docs(tmp_path: Path) -> None:
     assert ".cursor/rules/workspace.mdc" in doc_paths
     assert "packages/billing/README.md" in doc_paths
     assert "node_modules/ignored.ts" not in index.records
+    assert all(not p.startswith(".uv-cache/") for p in index.records)
 
     ranked_docs = {record.path: record.doc_score for record in index.docs}
     assert ranked_docs["AGENTS.md"] > ranked_docs["packages/billing/README.md"]

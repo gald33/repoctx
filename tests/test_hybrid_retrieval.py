@@ -163,7 +163,11 @@ def test_ranked_path_has_score_breakdown(tmp_path: Path) -> None:
     assert login is not None
     assert login.heuristic_score > 0
     assert login.embedding_score == 0.75
-    assert login.score == login.heuristic_score + DEFAULT_CONFIG.embedding_weight * 0.75
+    # Embedding cosine is the primary signal; lexical only contributes a small
+    # tiebreak. Score must be at least the cosine and bounded above by
+    # cosine + tiebreak weight.
+    assert login.score >= 0.75
+    assert login.score <= 0.75 + DEFAULT_CONFIG.lexical_tiebreak_weight + 1e-6
 
     d = login.to_dict(include_debug=True)
     assert "heuristic_score" in d
@@ -171,3 +175,37 @@ def test_ranked_path_has_score_breakdown(tmp_path: Path) -> None:
 
     d_no_debug = login.to_dict(include_debug=False)
     assert "heuristic_score" not in d_no_debug
+
+
+def test_embeddings_outrank_pure_lexical_match(tmp_path: Path) -> None:
+    """A high-cosine file with no token overlap must outrank a high-overlap, low-cosine file."""
+    _build_test_repo(tmp_path)
+    index = scan_repository(tmp_path)
+
+    # Task tokens overlap strongly with auth/login.py (lexical winner under
+    # the old additive formula). billing/invoice.py has zero token overlap
+    # but a near-perfect cosine — it should now win.
+    embedding_scores = {
+        "src/auth/login.py": 0.05,
+        "src/auth/token.py": 0.05,
+        "src/billing/invoice.py": 0.92,
+    }
+    ranked = rank_files(
+        index, "authenticate user login", DEFAULT_CONFIG,
+        embedding_scores=embedding_scores,
+    )
+    paths = [r.path for r in ranked]
+    assert "src/billing/invoice.py" in paths
+    assert paths.index("src/billing/invoice.py") < paths.index("src/auth/login.py")
+
+
+def test_reason_reports_semantic_signal(tmp_path: Path) -> None:
+    _build_test_repo(tmp_path)
+    index = scan_repository(tmp_path)
+    ranked = rank_files(
+        index, "authenticate user login", DEFAULT_CONFIG,
+        embedding_scores={"src/auth/login.py": 0.78},
+    )
+    login = next(r for r in ranked if r.path == "src/auth/login.py")
+    assert "Semantic similarity" in login.reason
+    assert "0.78" in login.reason

@@ -88,8 +88,12 @@ def rank_documents(
         heuristic_score = record.doc_score + (4.0 * len(path_overlap)) + (1.0 * len(content_overlap))
 
         emb_score = (embedding_scores or {}).get(record.path, 0.0)
-        emb_boost = config.embedding_weight * max(0.0, emb_score) if embedding_scores else 0.0
-        score = heuristic_score + emb_boost
+        score = _blend_score(
+            heuristic_score=heuristic_score,
+            emb_score=emb_score,
+            embeddings_active=embedding_scores is not None,
+            config=config,
+        )
 
         has_emb_signal = embedding_scores is not None and emb_score >= config.embedding_qualify_threshold
         if not has_emb_signal:
@@ -102,6 +106,8 @@ def rank_documents(
         reason = _build_reason(
             overlap=overlap,
             default_reason="High-value documentation for repository context",
+            emb_score=emb_score if embedding_scores is not None else None,
+            qualify_threshold=config.embedding_qualify_threshold,
         )
         ranked.append(
             RankedPath(
@@ -141,8 +147,12 @@ def rank_files(
             heuristic_score *= 0.5
 
         emb_score = (embedding_scores or {}).get(record.path, 0.0)
-        emb_boost = config.embedding_weight * max(0.0, emb_score) if embedding_scores else 0.0
-        score = heuristic_score + emb_boost
+        score = _blend_score(
+            heuristic_score=heuristic_score,
+            emb_score=emb_score,
+            embeddings_active=embedding_scores is not None,
+            config=config,
+        )
 
         has_emb_signal = embedding_scores is not None and emb_score >= config.embedding_qualify_threshold
         if not has_emb_signal:
@@ -154,6 +164,8 @@ def rank_files(
         reason = _build_reason(
             overlap=overlap,
             default_reason="Task tokens align with file name and content",
+            emb_score=emb_score if embedding_scores is not None else None,
+            qualify_threshold=config.embedding_qualify_threshold,
         )
         ranked.append(
             RankedPath(
@@ -226,11 +238,45 @@ def normalize_test_stem(stem: str) -> str:
     return normalized
 
 
-def _build_reason(overlap: list[str], default_reason: str) -> str:
-    if not overlap:
-        return default_reason
-    visible = ", ".join(overlap[:3])
-    return f"Matches task tokens: {visible}"
+def _blend_score(
+    heuristic_score: float,
+    emb_score: float,
+    embeddings_active: bool,
+    config: RepoCtxConfig,
+) -> float:
+    """Combine lexical and embedding signals.
+
+    When the embedding index is loaded, cosine similarity (0–1) is the primary
+    signal and the lexical heuristic is squashed into a small tiebreaker. When
+    no embeddings are available, fall back to the v1 pure-lexical score.
+    """
+    if not embeddings_active:
+        return heuristic_score
+    primary = max(0.0, emb_score)
+    # Squash heuristic into 0..~1 so the tiebreaker can never overpower a
+    # decent cosine. tanh is monotonic and saturates around heuristic ~ 12.
+    import math
+    lexical_norm = math.tanh(max(0.0, heuristic_score) / 12.0)
+    return primary + config.lexical_tiebreak_weight * lexical_norm
+
+
+def _build_reason(
+    overlap: list[str],
+    default_reason: str,
+    emb_score: float | None = None,
+    qualify_threshold: float = 0.3,
+) -> str:
+    has_emb = emb_score is not None and emb_score >= qualify_threshold
+    has_tokens = bool(overlap)
+    if has_emb and has_tokens:
+        visible = ", ".join(overlap[:3])
+        return f"Semantic similarity {emb_score:.2f}; tokens: {visible}"
+    if has_emb:
+        return f"Semantic similarity {emb_score:.2f}"
+    if has_tokens:
+        visible = ", ".join(overlap[:3])
+        return f"Matches task tokens: {visible}"
+    return default_reason
 
 
 def _select_snippet(record: FileRecord, overlap: list[str]) -> str | None:

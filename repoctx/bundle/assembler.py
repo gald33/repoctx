@@ -89,6 +89,7 @@ def build_bundle(
         "constraints": len(constraints),
         "relevant_code": len(relevant_code),
         "build_duration_ms": int((perf_counter() - started) * 1000),
+        "ranker": "embeddings" if embedding_scores else "lexical",
     }
     scope_paths = list(edit_scope.allowed_paths) + list(edit_scope.related_paths) + list(edit_scope.protected_paths)
     bundle.staleness = collect_state(repo_path, scope_paths=scope_paths)

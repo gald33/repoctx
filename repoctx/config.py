@@ -23,6 +23,7 @@ IGNORED_DIRS = (
     ".next",
     ".playwright-cli",
     ".pytest_cache",
+    ".uv-cache",
     ".venv",
     "__pycache__",
     "build",
@@ -95,6 +96,10 @@ class RepoCtxConfig:
     max_neighbors: int = 8
     embedding_weight: float = 12.0
     embedding_qualify_threshold: float = 0.3
+    # When embedding_scores are present, embeddings are the primary ranker
+    # (cosine 0–1) and the lexical heuristic becomes a small tiebreaker. This
+    # weight scales the normalized lexical score before adding it to cosine.
+    lexical_tiebreak_weight: float = 0.05
 
 
 DEFAULT_CONFIG = RepoCtxConfig()
