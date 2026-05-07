@@ -9,6 +9,8 @@ from typing import Any
 
 from repoctx.harness.claude_code import (
     AGENTS_SECTION_HEADER,
+    CLAUDE_MD_NUDGE_MARKER,
+    ensure_claude_md_nudge,
     install_claude_code,
     render_agents_section,
 )
@@ -21,6 +23,7 @@ def install_all(
     *,
     scaffold_authority: bool = True,
     build_index: bool | None = None,
+    claude_md_nudge: bool = True,
 ) -> dict[str, Any]:
     """One-shot install for every supported harness + optional scaffold.
 
@@ -43,7 +46,12 @@ def install_all(
         except Exception as exc:  # pragma: no cover - defensive
             errors[name] = f"{type(exc).__name__}: {exc}"
 
-    _try("claude_code", lambda: install_claude_code(repo_root=repo_root))
+    _try(
+        "claude_code",
+        lambda: install_claude_code(
+            repo_root=repo_root, claude_md_nudge=claude_md_nudge
+        ),
+    )
     _try("cursor", lambda: install_cursor(repo_root=repo_root))
     _try("codex", lambda: install_codex(repo_root=repo_root))
 
@@ -103,6 +111,8 @@ def _maybe_build_index(
 
 __all__ = [
     "AGENTS_SECTION_HEADER",
+    "CLAUDE_MD_NUDGE_MARKER",
+    "ensure_claude_md_nudge",
     "install_all",
     "install_claude_code",
     "install_codex",

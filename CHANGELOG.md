@@ -4,6 +4,39 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 [SemVer](https://semver.org/).
 
+## [1.2.0] — 2026-05-07
+
+### Added — pointer-aware repoctx-nudge in CLAUDE.md / AGENTS.md
+
+Claude Code auto-loads `CLAUDE.md` but not `AGENTS.md`, so even a
+thorough repoctx section in `AGENTS.md` was invisible to the harness on
+real projects (`mcp__repoctx__stats` showed near-zero bundle calls
+despite well-written guidance). `install` and `refresh` now place a
+short anchored block — marker `<!-- repoctx-nudge:v1 -->` — where
+whichever tool is reading will see it.
+
+- `install_claude_code` and `op_refresh` classify each markdown file as
+  `absent`, `pointer`, or `content`. A *pointer* is either a file we
+  created (`<!-- repoctx-pointer:v1 -->` marker) or a hand-written file
+  ≤500 bytes whose only substantive line is a `@OTHER.md` import.
+- Placement matrix: CLAUDE absent + AGENTS content → create CLAUDE.md
+  as `@AGENTS.md` pointer, nudge in AGENTS.md. CLAUDE pointer + AGENTS
+  content → nudge in AGENTS.md only. Both content → nudge in **both**
+  so single-file readers don't miss it. CLAUDE content + AGENTS
+  pointer/absent → nudge in CLAUDE.md only.
+- Idempotent and self-healing: deleting the block and re-running
+  `install` or `refresh` re-inserts it byte-identically.
+- Opt-out via `--no-claude-md-nudge` (CLI flag on `install`,
+  `install-claude-code`, `refresh`) and `REPOCTX_NO_CLAUDE_MD_NUDGE=1`.
+- `InstallResult` gained `claude_md_action`
+  (`pointer_created` | `nudge_inserted` | `no_op` | `skipped`) and
+  `agents_md_nudge_changed`. `op_refresh` now returns
+  `claude_md_nudge: {claude_md, claude_md_action, agents_md,
+  agents_md_action, any_inserted}`.
+
+Existing repos already on 1.1.x see no change until the next
+`install` / `refresh` runs against this version.
+
 ## [1.1.1] — 2026-05-01
 
 ### Fixed — `bundle()` / `get_task_context()` now use the embedding index
