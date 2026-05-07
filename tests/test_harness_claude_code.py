@@ -5,7 +5,28 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from repoctx.harness import AGENTS_SECTION_HEADER, install_claude_code
+import pytest
+
+from repoctx.harness import (
+    AGENTS_SECTION_HEADER,
+    ensure_claude_md_nudge,
+    install_claude_code,
+)
+from repoctx.harness.claude_code import (
+    ACTION_NO_OP,
+    ACTION_NUDGE_INSERTED,
+    ACTION_POINTER_CREATED,
+    ACTION_SKIPPED,
+    ENV_DISABLE_CLAUDE_MD_NUDGE,
+    NUDGE_BLOCK,
+    NUDGE_MARKER,
+    POINTER_MARKER,
+    _classify_md,
+)
+
+# Backward-compat aliases used by older imports/tests.
+CLAUDE_MD_NUDGE_MARKER = NUDGE_MARKER
+CLAUDE_MD_NUDGE_BLOCK = NUDGE_BLOCK
 
 
 def test_installer_creates_agents_md_and_mcp_config(tmp_path: Path) -> None:
@@ -94,3 +115,272 @@ def test_installer_agents_section_includes_upkeep(tmp_path: Path) -> None:
     text = (tmp_path / "AGENTS.md").read_text()
     assert "Embedding upkeep" in text
     assert "repoctx update" in text
+
+
+# -- _classify_md --------------------------------------------------------------
+
+
+def test_classify_md_absent(tmp_path: Path) -> None:
+    assert _classify_md(tmp_path / "CLAUDE.md", "AGENTS.md") == "absent"
+
+
+def test_classify_md_pointer_via_marker(tmp_path: Path) -> None:
+    """Files we created carry POINTER_MARKER and are always classified as pointer."""
+    path = tmp_path / "CLAUDE.md"
+    path.write_text(f"{POINTER_MARKER}\n@AGENTS.md\n")
+    assert _classify_md(path, "AGENTS.md") == "pointer"
+
+
+def test_classify_md_pointer_via_heuristic(tmp_path: Path) -> None:
+    """Short hand-written pointer (title + import line) → pointer."""
+    path = tmp_path / "CLAUDE.md"
+    path.write_text("# Project\n\n@AGENTS.md\n")
+    assert _classify_md(path, "AGENTS.md") == "pointer"
+
+
+def test_classify_md_pointer_just_import(tmp_path: Path) -> None:
+    """Bare `@AGENTS.md` import → pointer."""
+    path = tmp_path / "CLAUDE.md"
+    path.write_text("@AGENTS.md\n")
+    assert _classify_md(path, "AGENTS.md") == "pointer"
+
+
+def test_classify_md_content_when_substantive(tmp_path: Path) -> None:
+    """Short file with import + meaningful note → content (user took ownership)."""
+    path = tmp_path / "CLAUDE.md"
+    path.write_text(
+        "# Project\n\n@AGENTS.md\n\nClaude-specific note: use bun, not npm.\n"
+    )
+    assert _classify_md(path, "AGENTS.md") == "content"
+
+
+def test_classify_md_content_when_long(tmp_path: Path) -> None:
+    """File over the byte threshold → content even if it has an import."""
+    path = tmp_path / "CLAUDE.md"
+    path.write_text("@AGENTS.md\n" + "# Heading\n\nBody text. " * 200)
+    assert _classify_md(path, "AGENTS.md") == "content"
+
+
+def test_classify_md_content_no_import(tmp_path: Path) -> None:
+    """Short file without an import directive → content."""
+    path = tmp_path / "CLAUDE.md"
+    path.write_text("# Project\n\nSome notes.\n")
+    assert _classify_md(path, "AGENTS.md") == "content"
+
+
+# -- ensure_claude_md_nudge: dispatch matrix -----------------------------------
+
+
+def test_nudge_creates_pointer_when_claude_md_absent_and_agents_has_content(
+    tmp_path: Path,
+) -> None:
+    """No CLAUDE.md + AGENTS has content → pointer created, nudge in AGENTS."""
+    (tmp_path / "AGENTS.md").write_text(
+        "# Agents\n\n## Project guidance\n\nUse pytest.\n"
+    )
+    result = ensure_claude_md_nudge(tmp_path)
+    assert result.claude_md_action == ACTION_POINTER_CREATED
+    assert result.agents_md_action == ACTION_NUDGE_INSERTED
+    claude_text = (tmp_path / "CLAUDE.md").read_text()
+    assert POINTER_MARKER in claude_text
+    assert "@AGENTS.md" in claude_text
+    assert NUDGE_MARKER not in claude_text  # nudge is in AGENTS, not the pointer
+    assert NUDGE_MARKER in (tmp_path / "AGENTS.md").read_text()
+
+
+def test_nudge_skips_when_both_files_absent(tmp_path: Path) -> None:
+    """No AGENTS.md, no CLAUDE.md → both skipped, nothing created."""
+    result = ensure_claude_md_nudge(tmp_path)
+    assert result.claude_md_action == ACTION_SKIPPED
+    assert result.agents_md_action == ACTION_SKIPPED
+    assert not (tmp_path / "CLAUDE.md").exists()
+    assert not (tmp_path / "AGENTS.md").exists()
+
+
+def test_nudge_pointer_claude_md_lands_in_agents_only(tmp_path: Path) -> None:
+    """CLAUDE.md is a pointer → nudge in AGENTS only; CLAUDE.md untouched."""
+    (tmp_path / "CLAUDE.md").write_text(f"{POINTER_MARKER}\n@AGENTS.md\n")
+    (tmp_path / "AGENTS.md").write_text("# Agents\n\n## Section\nBody.\n")
+    snapshot = (tmp_path / "CLAUDE.md").read_bytes()
+    result = ensure_claude_md_nudge(tmp_path)
+    assert result.claude_md_action == ACTION_NO_OP
+    assert result.agents_md_action == ACTION_NUDGE_INSERTED
+    assert (tmp_path / "CLAUDE.md").read_bytes() == snapshot
+    assert NUDGE_MARKER in (tmp_path / "AGENTS.md").read_text()
+
+
+def test_nudge_both_content_lands_in_both(tmp_path: Path) -> None:
+    """Both files have substantive content → nudge in both."""
+    (tmp_path / "CLAUDE.md").write_text("# Project\n\nClaude-specific guidance.\n")
+    (tmp_path / "AGENTS.md").write_text("# Agents\n\nProject conventions.\n")
+    result = ensure_claude_md_nudge(tmp_path)
+    assert result.claude_md_action == ACTION_NUDGE_INSERTED
+    assert result.agents_md_action == ACTION_NUDGE_INSERTED
+    assert NUDGE_MARKER in (tmp_path / "CLAUDE.md").read_text()
+    assert NUDGE_MARKER in (tmp_path / "AGENTS.md").read_text()
+
+
+def test_nudge_content_claude_pointer_agents_lands_in_claude_only(
+    tmp_path: Path,
+) -> None:
+    """CLAUDE has content, AGENTS is a pointer → nudge in CLAUDE only."""
+    (tmp_path / "CLAUDE.md").write_text("# Project\n\nReal content here.\n")
+    (tmp_path / "AGENTS.md").write_text(f"{POINTER_MARKER}\n@CLAUDE.md\n")
+    agents_snapshot = (tmp_path / "AGENTS.md").read_bytes()
+    result = ensure_claude_md_nudge(tmp_path)
+    assert result.claude_md_action == ACTION_NUDGE_INSERTED
+    assert result.agents_md_action == ACTION_NO_OP
+    assert NUDGE_MARKER in (tmp_path / "CLAUDE.md").read_text()
+    assert (tmp_path / "AGENTS.md").read_bytes() == agents_snapshot
+
+
+def test_nudge_content_claude_absent_agents_lands_in_claude_only(
+    tmp_path: Path,
+) -> None:
+    """CLAUDE has content, AGENTS is absent → nudge in CLAUDE only."""
+    (tmp_path / "CLAUDE.md").write_text("# Project\n\nContent.\n")
+    result = ensure_claude_md_nudge(tmp_path)
+    assert result.claude_md_action == ACTION_NUDGE_INSERTED
+    assert result.agents_md_action == ACTION_SKIPPED
+    assert NUDGE_MARKER in (tmp_path / "CLAUDE.md").read_text()
+    assert not (tmp_path / "AGENTS.md").exists()
+
+
+# -- ensure_claude_md_nudge: write semantics -----------------------------------
+
+
+def test_nudge_appends_when_no_separator(tmp_path: Path) -> None:
+    """File without a `---` line → block appended at EOF with blank-line gap."""
+    (tmp_path / "CLAUDE.md").write_text("# Project\n\nSome guidance.\n")
+    result = ensure_claude_md_nudge(tmp_path)
+    assert result.claude_md_action == ACTION_NUDGE_INSERTED
+    text = (tmp_path / "CLAUDE.md").read_text(encoding="utf-8")
+    assert "Some guidance." in text
+    assert text.endswith(NUDGE_BLOCK)
+    assert "\n\n" + NUDGE_MARKER in text
+
+
+def test_nudge_inserts_before_first_separator(tmp_path: Path) -> None:
+    """File with a `---` line → block inserted immediately before it."""
+    original = "# Project\nIntro paragraph.\n---\n## Section\nBody.\n"
+    (tmp_path / "CLAUDE.md").write_text(original)
+    result = ensure_claude_md_nudge(tmp_path)
+    assert result.claude_md_action == ACTION_NUDGE_INSERTED
+    text = (tmp_path / "CLAUDE.md").read_text(encoding="utf-8")
+    marker_idx = text.index(NUDGE_MARKER)
+    sep_idx = text.index("\n---\n")
+    assert marker_idx < sep_idx
+    assert "Intro paragraph." in text[:marker_idx]
+    assert "## Section" in text[sep_idx:]
+
+
+def test_nudge_is_idempotent(tmp_path: Path) -> None:
+    """Marker already present → no-op, file byte-identical."""
+    (tmp_path / "CLAUDE.md").write_text("# Project\n\nBody.\n")
+    ensure_claude_md_nudge(tmp_path)
+    snapshot = (tmp_path / "CLAUDE.md").read_bytes()
+    result = ensure_claude_md_nudge(tmp_path)
+    assert result.claude_md_action == ACTION_NO_OP
+    assert (tmp_path / "CLAUDE.md").read_bytes() == snapshot
+
+
+def test_nudge_self_heals_after_marker_deletion(tmp_path: Path) -> None:
+    """Delete the block, re-run → block is re-added in canonical form."""
+    (tmp_path / "CLAUDE.md").write_text("# Project\n\nBody.\n")
+    ensure_claude_md_nudge(tmp_path)
+    canonical = (tmp_path / "CLAUDE.md").read_bytes()
+    (tmp_path / "CLAUDE.md").write_text("# Project\n\nBody.\n")
+    result = ensure_claude_md_nudge(tmp_path)
+    assert result.claude_md_action == ACTION_NUDGE_INSERTED
+    assert (tmp_path / "CLAUDE.md").read_bytes() == canonical
+
+
+def test_nudge_pointer_creation_idempotent_on_second_run(tmp_path: Path) -> None:
+    """After pointer creation, a second run is a no-op (CLAUDE is now pointer)."""
+    (tmp_path / "AGENTS.md").write_text("# Agents\n\nReal content.\n")
+    first = ensure_claude_md_nudge(tmp_path)
+    assert first.claude_md_action == ACTION_POINTER_CREATED
+    claude_snapshot = (tmp_path / "CLAUDE.md").read_bytes()
+    agents_snapshot = (tmp_path / "AGENTS.md").read_bytes()
+    second = ensure_claude_md_nudge(tmp_path)
+    assert second.claude_md_action == ACTION_NO_OP
+    assert second.agents_md_action == ACTION_NO_OP
+    assert (tmp_path / "CLAUDE.md").read_bytes() == claude_snapshot
+    assert (tmp_path / "AGENTS.md").read_bytes() == agents_snapshot
+
+
+def test_nudge_disabled_via_parameter(tmp_path: Path) -> None:
+    """enabled=False → both files skipped, no writes."""
+    (tmp_path / "CLAUDE.md").write_text("# Project\n")
+    (tmp_path / "AGENTS.md").write_text("# Agents\n\nContent.\n")
+    result = ensure_claude_md_nudge(tmp_path, enabled=False)
+    assert result.claude_md_action == ACTION_SKIPPED
+    assert result.agents_md_action == ACTION_SKIPPED
+    assert NUDGE_MARKER not in (tmp_path / "CLAUDE.md").read_text()
+    assert NUDGE_MARKER not in (tmp_path / "AGENTS.md").read_text()
+
+
+def test_nudge_disabled_via_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """REPOCTX_NO_CLAUDE_MD_NUDGE truthy → both files skipped."""
+    (tmp_path / "CLAUDE.md").write_text("# Project\n")
+    (tmp_path / "AGENTS.md").write_text("# Agents\n\nContent.\n")
+    monkeypatch.setenv(ENV_DISABLE_CLAUDE_MD_NUDGE, "1")
+    result = ensure_claude_md_nudge(tmp_path)
+    assert result.claude_md_action == ACTION_SKIPPED
+    assert result.agents_md_action == ACTION_SKIPPED
+    assert NUDGE_MARKER not in (tmp_path / "CLAUDE.md").read_text()
+    assert NUDGE_MARKER not in (tmp_path / "AGENTS.md").read_text()
+
+
+# -- install_claude_code integration -------------------------------------------
+
+
+def test_install_inserts_nudge_in_both_when_claude_md_has_content(
+    tmp_path: Path,
+) -> None:
+    """Pre-existing content CLAUDE.md → install adds nudge there AND in AGENTS.md."""
+    (tmp_path / "CLAUDE.md").write_text("# Project\n\nContent.\n")
+    result = install_claude_code(tmp_path)
+    assert result.claude_md == (tmp_path / "CLAUDE.md").resolve()
+    assert result.claude_md_action == ACTION_NUDGE_INSERTED
+    assert result.claude_md_changed is True
+    assert result.agents_md_nudge_changed is True
+    assert NUDGE_MARKER in (tmp_path / "CLAUDE.md").read_text()
+    assert NUDGE_MARKER in (tmp_path / "AGENTS.md").read_text()
+
+
+def test_install_creates_pointer_when_claude_md_missing(tmp_path: Path) -> None:
+    """No CLAUDE.md → install creates AGENTS.md (with section), then a pointer
+    CLAUDE.md, then puts the nudge in AGENTS.md."""
+    result = install_claude_code(tmp_path)
+    assert result.claude_md_action == ACTION_POINTER_CREATED
+    assert result.claude_md_changed is True
+    claude_text = (tmp_path / "CLAUDE.md").read_text()
+    assert POINTER_MARKER in claude_text
+    assert "@AGENTS.md" in claude_text
+    # Nudge lives in AGENTS.md (alongside the existing Ground truth section).
+    assert result.agents_md_nudge_changed is True
+    assert NUDGE_MARKER in (tmp_path / "AGENTS.md").read_text()
+
+
+def test_install_opt_out_omits_nudge_keys(tmp_path: Path) -> None:
+    """--no-claude-md-nudge → no pointer created, no block inserted, JSON omits keys."""
+    (tmp_path / "CLAUDE.md").write_text("# Project\n")
+    result = install_claude_code(tmp_path, claude_md_nudge=False)
+    assert result.claude_md is None
+    assert result.claude_md_changed is False
+    assert result.claude_md_action is None
+    assert result.agents_md_nudge_changed is False
+    payload = result.to_dict()
+    assert "claude_md" not in payload
+    assert "claude_md_action" not in payload
+    assert "agents_md_nudge_changed" not in payload
+    assert NUDGE_MARKER not in (tmp_path / "CLAUDE.md").read_text()
+
+
+def test_install_to_dict_includes_claude_md_action(tmp_path: Path) -> None:
+    (tmp_path / "CLAUDE.md").write_text("# Project\n\nContent.\n")
+    result = install_claude_code(tmp_path)
+    payload = result.to_dict()
+    assert payload["claude_md_action"] == ACTION_NUDGE_INSERTED
+    assert payload["agents_md_nudge_changed"] is True

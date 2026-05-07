@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from repoctx.bundle import build_bundle
+from repoctx.harness.claude_code import ensure_claude_md_nudge
 from repoctx.protocol.changes_op import op_detect_changes
 
 
@@ -14,6 +15,8 @@ def op_refresh(
     changed_files: list[str],
     current_scope: dict[str, Any] | None = None,
     repo_root: str | Path = ".",
+    *,
+    claude_md_nudge: bool = True,
 ) -> dict[str, Any]:
     bundle = build_bundle(task, repo_root=repo_root)
     new_scope = bundle.edit_scope.to_dict()
@@ -23,6 +26,8 @@ def op_refresh(
         old = set((current_scope or {}).get(key, []))
         new = set(new_scope.get(key, []))
         return sorted(new - old)
+
+    nudge = ensure_claude_md_nudge(repo_root, enabled=claude_md_nudge)
 
     return {
         "schema_version": "repoctx-bundle/1",
@@ -41,4 +46,5 @@ def op_refresh(
         "affected": (changes or {}).get("affected", []),
         "staleness": dict(bundle.staleness),
         "when_to_recall_repoctx": list(bundle.when_to_recall_repoctx),
+        "claude_md_nudge": nudge.to_dict(),
     }

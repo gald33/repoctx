@@ -82,3 +82,50 @@ def test_op_refresh_reports_scope_delta(repo: Path) -> None:
         + delta["added_protected_paths"]
     )
     assert added
+
+
+def test_op_refresh_self_heals_with_pointer_when_claude_md_absent(repo: Path) -> None:
+    """No CLAUDE.md but AGENTS.md has content → pointer created + nudge in AGENTS."""
+    from repoctx.harness.claude_code import (
+        ACTION_NUDGE_INSERTED,
+        ACTION_POINTER_CREATED,
+        NUDGE_MARKER,
+        POINTER_MARKER,
+    )
+
+    out = op_refresh("tokens", [], None, repo_root=repo)
+    nudge = out["claude_md_nudge"]
+    assert nudge["any_inserted"] is True
+    assert nudge["claude_md_action"] == ACTION_POINTER_CREATED
+    assert nudge["agents_md_action"] == ACTION_NUDGE_INSERTED
+    assert POINTER_MARKER in (repo / "CLAUDE.md").read_text()
+    assert NUDGE_MARKER in (repo / "AGENTS.md").read_text()
+
+
+def test_op_refresh_self_heals_nudge_in_existing_claude_md(repo: Path) -> None:
+    """CLAUDE.md with content + AGENTS.md with content → nudge in both."""
+    from repoctx.harness.claude_code import ACTION_NUDGE_INSERTED, NUDGE_MARKER
+
+    (repo / "CLAUDE.md").write_text("# Project\n\nReal content.\n")
+    out = op_refresh("tokens", [], None, repo_root=repo)
+    nudge = out["claude_md_nudge"]
+    assert nudge["claude_md_action"] == ACTION_NUDGE_INSERTED
+    assert nudge["agents_md_action"] == ACTION_NUDGE_INSERTED
+    assert NUDGE_MARKER in (repo / "CLAUDE.md").read_text()
+    assert NUDGE_MARKER in (repo / "AGENTS.md").read_text()
+    # Second refresh is a no-op on both files.
+    out2 = op_refresh("tokens", [], None, repo_root=repo)
+    assert out2["claude_md_nudge"]["any_inserted"] is False
+
+
+def test_op_refresh_skips_nudge_when_disabled(repo: Path) -> None:
+    """claude_md_nudge=False → no writes, no pointer created."""
+    from repoctx.harness.claude_code import ACTION_SKIPPED, NUDGE_MARKER
+
+    (repo / "CLAUDE.md").write_text("# Project\n")
+    out = op_refresh("tokens", [], None, repo_root=repo, claude_md_nudge=False)
+    nudge = out["claude_md_nudge"]
+    assert nudge["any_inserted"] is False
+    assert nudge["claude_md_action"] == ACTION_SKIPPED
+    assert nudge["agents_md_action"] == ACTION_SKIPPED
+    assert NUDGE_MARKER not in (repo / "CLAUDE.md").read_text()

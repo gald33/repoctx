@@ -233,6 +233,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--current-scope-json",
         help="JSON for current edit scope (keys: allowed_paths, related_paths, protected_paths)",
     )
+    rf.add_argument(
+        "--no-claude-md-nudge",
+        dest="claude_md_nudge",
+        action="store_false",
+        default=True,
+        help=(
+            "Skip the self-heal step that re-inserts the repoctx-nudge block "
+            "into CLAUDE.md when missing. Also disabled by setting "
+            "REPOCTX_NO_CLAUDE_MD_NUDGE=1."
+        ),
+    )
 
     dc = sub.add_parser(
         "detect-changes",
@@ -275,6 +286,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip the contracts/docs/examples scaffold (just register MCP entries)",
     )
+    ia_all.add_argument(
+        "--no-claude-md-nudge",
+        dest="claude_md_nudge",
+        action="store_false",
+        default=True,
+        help=(
+            "Skip inserting the anchored repoctx-nudge block into CLAUDE.md. "
+            "Also disabled by setting REPOCTX_NO_CLAUDE_MD_NUDGE=1."
+        ),
+    )
     ia_all_index = ia_all.add_mutually_exclusive_group()
     ia_all_index.add_argument(
         "--no-index",
@@ -295,6 +316,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Install AGENTS.md section + .mcp.json entry for repoctx (v2)",
     )
     ic.add_argument("--repo", default=".", help="Repository root")
+    ic.add_argument(
+        "--no-claude-md-nudge",
+        dest="claude_md_nudge",
+        action="store_false",
+        default=True,
+        help=(
+            "Skip inserting the anchored repoctx-nudge block into CLAUDE.md. "
+            "Also disabled by setting REPOCTX_NO_CLAUDE_MD_NUDGE=1."
+        ),
+    )
 
     icu = sub.add_parser(
         "install-cursor",
@@ -447,7 +478,13 @@ def _cmd_refresh(args: argparse.Namespace) -> None:
         current_scope = json.loads(args.current_scope_json)
     print(
         json.dumps(
-            op_refresh(args.task, args.changed, current_scope, repo_root=args.repo),
+            op_refresh(
+                args.task,
+                args.changed,
+                current_scope,
+                repo_root=args.repo,
+                claude_md_nudge=getattr(args, "claude_md_nudge", True),
+            ),
             indent=2,
         )
     )
@@ -475,6 +512,7 @@ def _cmd_install_all(args: argparse.Namespace) -> None:
         repo_root=args.repo,
         scaffold_authority=not args.no_scaffold,
         build_index=args.build_index,
+        claude_md_nudge=getattr(args, "claude_md_nudge", True),
     )
     print(json.dumps(result, indent=2))
 
@@ -482,7 +520,10 @@ def _cmd_install_all(args: argparse.Namespace) -> None:
 def _cmd_install_claude_code(args: argparse.Namespace) -> None:
     from repoctx.harness import install_claude_code
 
-    result = install_claude_code(repo_root=args.repo)
+    result = install_claude_code(
+        repo_root=args.repo,
+        claude_md_nudge=getattr(args, "claude_md_nudge", True),
+    )
     print(json.dumps(result.to_dict(), indent=2))
 
 

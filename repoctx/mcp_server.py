@@ -460,19 +460,27 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
         changed_files: list[str],
         current_scope: dict[str, object] | None = None,
         repo_root: str | None = None,
+        claude_md_nudge: bool = True,
     ) -> dict[str, object]:
         root = _resolve(repo_root)
         return _run_op(
             "refresh",
             task,
             root,
-            lambda: op_refresh(task, changed_files, current_scope, repo_root=root),
+            lambda: op_refresh(
+                task,
+                changed_files,
+                current_scope,
+                repo_root=root,
+                claude_md_nudge=claude_md_nudge,
+            ),
         )
     _register("Recompute scope/authority after the change set has shifted.", refresh)
 
     def install(
         repo_root: str | None = None,
         scaffold_authority: bool = True,
+        claude_md_nudge: bool = True,
     ) -> dict[str, object]:
         from repoctx.harness import install_all
 
@@ -481,7 +489,11 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
             "install",
             "",
             root,
-            lambda: install_all(repo_root=root, scaffold_authority=scaffold_authority),
+            lambda: install_all(
+                repo_root=root,
+                scaffold_authority=scaffold_authority,
+                claude_md_nudge=claude_md_nudge,
+            ),
         )
     _register(
         "Install repoctx into a repo: writes AGENTS.md section + MCP config "
