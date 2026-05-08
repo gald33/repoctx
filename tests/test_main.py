@@ -8,6 +8,7 @@ import pytest
 
 from repoctx.experiment import create_experiment_worktrees
 from repoctx import main as repoctx_main
+from repoctx.commands import experiment as repoctx_experiment_cmd
 from repoctx.telemetry import (
     load_active_experiment,
     load_experiment_session,
@@ -101,7 +102,7 @@ def test_experiment_start_creates_session_and_prints_next_steps(tmp_path: Path, 
     uuids = iter(["session-1", "task-1"])
 
     monkeypatch.setenv("REPOCTX_TELEMETRY_DIR", str(telemetry_dir))
-    monkeypatch.setattr(repoctx_main, "uuid4", lambda: type("FakeUuid", (), {"hex": next(uuids)})())
+    monkeypatch.setattr(repoctx_experiment_cmd, "uuid4", lambda: type("FakeUuid", (), {"hex": next(uuids)})())
     monkeypatch.setattr(sys, "argv", ["repoctx", "experiment", "demo task", "--repo", str(tmp_path)])
 
     repoctx_main.main()
@@ -137,7 +138,7 @@ def test_experiment_wizard_hands_off_control_and_sets_active_session(tmp_path: P
     )
 
     monkeypatch.setenv("REPOCTX_TELEMETRY_DIR", str(telemetry_dir))
-    monkeypatch.setattr(repoctx_main, "uuid4", lambda: type("FakeUuid", (), {"hex": next(uuids)})())
+    monkeypatch.setattr(repoctx_experiment_cmd, "uuid4", lambda: type("FakeUuid", (), {"hex": next(uuids)})())
     monkeypatch.setattr("builtins.input", lambda _: next(answers))
     monkeypatch.setattr(sys, "argv", ["repoctx", "experiment"])
 
@@ -162,7 +163,7 @@ def test_experiment_resume_records_control_then_treatment_then_summary(tmp_path:
     start_answers = iter(["", "n", "Update README only.", "", "y"])
 
     monkeypatch.setenv("REPOCTX_TELEMETRY_DIR", str(telemetry_dir))
-    monkeypatch.setattr(repoctx_main, "uuid4", lambda: type("FakeUuid", (), {"hex": next(uuids)})())
+    monkeypatch.setattr(repoctx_experiment_cmd, "uuid4", lambda: type("FakeUuid", (), {"hex": next(uuids)})())
     monkeypatch.setattr("builtins.input", lambda _: next(start_answers))
     monkeypatch.setattr(sys, "argv", ["repoctx", "experiment"])
     repoctx_main.main()
@@ -211,7 +212,7 @@ def test_experiment_resume_ignores_active_session_from_other_repo(tmp_path: Path
 
     uuids = iter(["session-a", "task-a"])
     monkeypatch.setenv("REPOCTX_TELEMETRY_DIR", str(telemetry_dir))
-    monkeypatch.setattr(repoctx_main, "uuid4", lambda: type("FakeUuid", (), {"hex": next(uuids)})())
+    monkeypatch.setattr(repoctx_experiment_cmd, "uuid4", lambda: type("FakeUuid", (), {"hex": next(uuids)})())
     monkeypatch.chdir(repo_a)
     start_answers = iter(["", "n", "Task A", "", "y"])
     monkeypatch.setattr("builtins.input", lambda _: next(start_answers))
@@ -239,7 +240,7 @@ def test_experiment_resume_after_manual_control_record_writes_treatment_config(t
     uuids = iter(["session-8", "task-8"])
 
     monkeypatch.setenv("REPOCTX_TELEMETRY_DIR", str(telemetry_dir))
-    monkeypatch.setattr(repoctx_main, "uuid4", lambda: type("FakeUuid", (), {"hex": next(uuids)})())
+    monkeypatch.setattr(repoctx_experiment_cmd, "uuid4", lambda: type("FakeUuid", (), {"hex": next(uuids)})())
     monkeypatch.setattr(sys, "argv", ["repoctx", "experiment", "demo task", "--repo", str(tmp_path)])
     repoctx_main.main()
     _ = capsys.readouterr()
