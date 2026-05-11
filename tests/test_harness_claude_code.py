@@ -384,3 +384,124 @@ def test_install_to_dict_includes_claude_md_action(tmp_path: Path) -> None:
     payload = result.to_dict()
     assert payload["claude_md_action"] == ACTION_NUDGE_INSERTED
     assert payload["agents_md_nudge_changed"] is True
+
+
+# -- v2 anchor block (stronger directive + non-trivial definition) ----------
+
+
+def test_install_writes_v2_anchor_block(tmp_path: Path) -> None:
+    """New installs ship the v2 marker with the "you must call" wording."""
+    (tmp_path / "CLAUDE.md").write_text("# Project\n\nContent.\n")
+    install_claude_code(tmp_path)
+    text = (tmp_path / "CLAUDE.md").read_text()
+    assert "<!-- repoctx-nudge:v2 -->" in text
+    assert "**must call**" in text
+    assert "Non-trivial =" in text
+
+
+def test_install_upgrades_v1_anchor_block_in_place(tmp_path: Path) -> None:
+    """v1 marker present → block is rewritten in place to v2, surroundings preserved."""
+    from repoctx.harness.claude_code import NUDGE_MARKER_V1
+
+    before = (
+        "# Project\n\n"
+        "Some intro line.\n\n"
+        f"{NUDGE_MARKER_V1}\n"
+        "> **repoctx is installed for this repo.** For non-trivial tasks, call\n"
+        "> `mcp__repoctx__bundle(task)` before proposing a plan, and\n"
+        "> `mcp__repoctx__validate_plan` + `mcp__repoctx__risk_report` before\n"
+        "> declaring done.\n\n"
+        "## Later section\n\nDon't touch me.\n"
+    )
+    (tmp_path / "CLAUDE.md").write_text(before)
+    install_claude_code(tmp_path)
+    after = (tmp_path / "CLAUDE.md").read_text()
+
+    assert NUDGE_MARKER_V1 not in after
+    assert "<!-- repoctx-nudge:v2 -->" in after
+    assert "**must call**" in after
+    assert "Some intro line." in after
+    assert "Don't touch me." in after
+    # Exactly one v2 marker — migration shouldn't have stacked blocks.
+    assert after.count("<!-- repoctx-nudge:v2 -->") == 1
+
+
+def test_v1_to_v2_migration_is_idempotent(tmp_path: Path) -> None:
+    """A second install after the v1→v2 migration is a no-op."""
+    from repoctx.harness.claude_code import NUDGE_MARKER_V1
+
+    (tmp_path / "CLAUDE.md").write_text(
+        f"# Project\n\n{NUDGE_MARKER_V1}\n> Old wording.\n"
+    )
+    first = install_claude_code(tmp_path)
+    second = install_claude_code(tmp_path)
+    assert first.claude_md_action == ACTION_NUDGE_INSERTED
+    assert second.claude_md_action == ACTION_NO_OP
+
+
+# -- UserPromptSubmit / Stop hooks ------------------------------------------
+
+
+def _hook_commands(settings: dict, event: str) -> list[str]:
+    return [
+        h.get("command", "")
+        for entry in settings.get("hooks", {}).get(event, [])
+        if isinstance(entry, dict)
+        for h in (entry.get("hooks") or [])
+        if isinstance(h, dict)
+    ]
+
+
+def test_installer_writes_prompt_submit_and_stop_hooks(tmp_path: Path) -> None:
+    install_claude_code(tmp_path)
+    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+
+    prompt_cmds = _hook_commands(settings, "UserPromptSubmit")
+    assert any(c.startswith("repoctx hook prompt-nudge") for c in prompt_cmds)
+
+    stop_cmds = _hook_commands(settings, "Stop")
+    assert any(c.startswith("repoctx hook stop-check") for c in stop_cmds)
+
+
+def test_new_hooks_are_idempotent(tmp_path: Path) -> None:
+    install_claude_code(tmp_path)
+    second = install_claude_code(tmp_path)
+    assert not second.settings_changed
+    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+
+    for event, prefix in [
+        ("PostToolUse", "repoctx update"),
+        ("UserPromptSubmit", "repoctx hook prompt-nudge"),
+        ("Stop", "repoctx hook stop-check"),
+    ]:
+        matching = [c for c in _hook_commands(settings, event) if c.startswith(prefix)]
+        assert len(matching) == 1, (event, matching)
+
+
+def test_new_hooks_preserve_user_authored_entries(tmp_path: Path) -> None:
+    settings_dir = tmp_path / ".claude"
+    settings_dir.mkdir()
+    (settings_dir / "settings.json").write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "UserPromptSubmit": [
+                        {"hooks": [{"type": "command", "command": "echo prompt"}]}
+                    ],
+                    "Stop": [
+                        {"hooks": [{"type": "command", "command": "echo stop"}]}
+                    ],
+                }
+            }
+        )
+    )
+    install_claude_code(tmp_path)
+    settings = json.loads((settings_dir / "settings.json").read_text())
+
+    prompt_cmds = _hook_commands(settings, "UserPromptSubmit")
+    assert "echo prompt" in prompt_cmds
+    assert any(c.startswith("repoctx hook prompt-nudge") for c in prompt_cmds)
+
+    stop_cmds = _hook_commands(settings, "Stop")
+    assert "echo stop" in stop_cmds
+    assert any(c.startswith("repoctx hook stop-check") for c in stop_cmds)

@@ -4,6 +4,54 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added — task-entry / task-exit nudges via Claude Code hooks
+
+Telemetry from active consumer repos showed that even with the v1 anchored
+nudge block in place, `bundle()` and `validate_plan()` were still not
+getting called on non-trivial commits — the block is documentation, not
+behavior. This release adds harness-level hooks that make those calls
+fire, and tightens the directive so the agent reads it as a requirement
+instead of a suggestion.
+
+- **New CLI subcommand `repoctx hook`** with two sub-actions, both reading
+  Claude Code hook JSON from stdin and always exiting 0 so they can never
+  block the user's flow:
+  - `repoctx hook prompt-nudge` — `UserPromptSubmit` handler. Substantive
+    prompts (length > 40 OR matches
+    `\b(implement|refactor|fix|add|build|rewrite|migrate|integrate|design)\b`)
+    print a one-line reminder to call `mcp__repoctx__bundle`. Trivial
+    prompts produce no output.
+  - `repoctx hook stop-check` — `Stop` handler. Reads the session
+    transcript, counts `Edit|Write|MultiEdit` tool uses and
+    `mcp__repoctx__validate_plan` calls in the current turn, and prints a
+    stderr reminder if edits happened without `validate_plan`. Honors
+    `stop_hook_active` to prevent loops.
+
+- **`repoctx install` wires both hooks automatically** alongside the
+  existing `PostToolUse` `repoctx update --from-claude-hook` entry. All
+  three entries are JSON-merged into `.claude/settings.json`; unrelated
+  user-authored hooks are preserved, and matching is by command prefix so
+  re-running install never duplicates entries.
+
+- **Anchored nudge block bumped v1 → v2** with stronger phrasing (`**must
+  call**`) and an inline definition of "non-trivial" (touches >1 file OR
+  introduces new behavior OR adds/removes a public API). On the next
+  `install` / `refresh`, existing v1 blocks are rewritten in place — the
+  surrounding document is preserved and the upgrade is idempotent thereafter.
+
+- **Dev-only `REPOCTX_LEARN=1`** appends `If you decide to skip this,
+  briefly state the reason.` to both reminders so adoption-tuning weeks
+  can capture skip rationale. Off by default — regular sessions don't pay
+  the token cost on every non-trivial turn.
+
+Existing installs upgrade on the next `repoctx install`. The
+`InstallResult` shape is unchanged (the new hook entries are reflected in
+the existing `settings_changed` flag); `claude_md_action` may now report
+`nudge_inserted` against a v1-marked file when the block was rewritten in
+place to v2.
+
 ## [1.2.0] — 2026-05-07
 
 ### Added — pointer-aware repoctx-nudge in CLAUDE.md / AGENTS.md

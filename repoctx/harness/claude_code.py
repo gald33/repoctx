@@ -69,17 +69,34 @@ MCP_SERVER_NAME = "repoctx"
 HOOK_MATCHER = "Edit|Write|MultiEdit"
 HOOK_COMMAND = "repoctx update --from-claude-hook"
 
+# Task-entry / task-exit nudge hooks. Wired in alongside the PostToolUse
+# embedding-update hook so the agent gets harness-level prompts to call
+# `mcp__repoctx__bundle` on substantive prompts and to call
+# `mcp__repoctx__validate_plan` before stopping.
+PROMPT_NUDGE_COMMAND = "repoctx hook prompt-nudge"
+STOP_CHECK_COMMAND = "repoctx hook stop-check"
+
 CLAUDE_MD_FILENAME = "CLAUDE.md"
 AGENTS_MD_FILENAME = "AGENTS.md"
 
-NUDGE_MARKER = "<!-- repoctx-nudge:v1 -->"
+NUDGE_MARKER_V1 = "<!-- repoctx-nudge:v1 -->"
+NUDGE_MARKER_V2 = "<!-- repoctx-nudge:v2 -->"
+# ``NUDGE_MARKER`` always points at the current scaffold version. Existing
+# code that imports it stays correct; tests that need to detect the older
+# generation specifically should import ``NUDGE_MARKER_V1``.
+NUDGE_MARKER = NUDGE_MARKER_V2
+
 NUDGE_BLOCK = """\
-<!-- repoctx-nudge:v1 -->
-> **repoctx is installed for this repo.** For non-trivial tasks, call
-> `mcp__repoctx__bundle(task)` before proposing a plan, and
+<!-- repoctx-nudge:v2 -->
+> **repoctx is installed for this repo.** For any non-trivial task you
+> **must call** `mcp__repoctx__bundle(task)` before proposing a plan, and
 > `mcp__repoctx__validate_plan` + `mcp__repoctx__risk_report` before
 > declaring done. Use `mcp__repoctx__authority(task)` if unsure whether
 > a change violates a constraint.
+>
+> **Non-trivial = touches >1 file OR introduces new behavior OR
+> adds/removes a public API.** Single-file typo/rename/comment-only
+> changes are trivial.
 """
 
 POINTER_MARKER = "<!-- repoctx-pointer:v1 -->"
@@ -316,12 +333,57 @@ def _create_pointer_claude_md(path: Path) -> None:
 
 
 def _insert_nudge_into_file(path: Path) -> bool:
-    """Insert the nudge block into ``path`` if absent. Idempotent."""
+    """Insert or upgrade the nudge block in ``path``. Idempotent.
+
+    - v2 marker present → no-op.
+    - v1 marker present → rewrite the v1 block in place with the v2 block,
+      preserving everything before/after it.
+    - Neither marker → insert v2 block via :func:`_render_with_nudge_inserted`.
+    """
     text = path.read_text(encoding="utf-8")
-    if NUDGE_MARKER in text:
+    if NUDGE_MARKER_V2 in text:
         return False
+    if NUDGE_MARKER_V1 in text:
+        upgraded = _upgrade_v1_nudge_block(text)
+        if upgraded == text:
+            return False
+        path.write_text(upgraded, encoding="utf-8")
+        return True
     path.write_text(_render_with_nudge_inserted(text), encoding="utf-8")
     return True
+
+
+def _upgrade_v1_nudge_block(text: str) -> str:
+    """Replace the v1 anchored block with the v2 block, preserving surroundings.
+
+    The v1 block we wrote is a single ``<!-- repoctx-nudge:v1 -->`` marker
+    line followed by a contiguous run of blockquote lines starting with
+    ``>``. The block ends at the first non-blockquote, non-blank line (or
+    EOF). We match that range and substitute the v2 block in its place.
+    """
+    lines = text.splitlines(keepends=True)
+    start = None
+    for i, line in enumerate(lines):
+        if line.rstrip("\n") == NUDGE_MARKER_V1:
+            start = i
+            break
+    if start is None:
+        return text
+
+    end = start + 1
+    while end < len(lines):
+        stripped = lines[end].lstrip()
+        if stripped.startswith(">"):
+            end += 1
+            continue
+        if lines[end].strip() == "":
+            # A blank line inside the block terminates the block. We stop
+            # before it so the blank line stays as the separator.
+            break
+        break
+
+    new_block = NUDGE_BLOCK if NUDGE_BLOCK.endswith("\n") else NUDGE_BLOCK + "\n"
+    return "".join(lines[:start]) + new_block + "".join(lines[end:])
 
 
 def _nudge_disabled_in_env() -> bool:
@@ -392,10 +454,21 @@ def _ensure_mcp_registration(root: Path) -> tuple[Path, bool]:
 
 
 def _ensure_post_tool_hook(root: Path) -> tuple[Path, bool]:
-    """Register a PostToolUse hook that queues edits via `repoctx update`.
+    """Register the three Claude Code hooks repoctx ships with.
 
-    Writes to ``.claude/settings.json`` so the hook is committed alongside the
-    project. Idempotent: a matching hook entry is detected and left alone.
+    Writes to ``.claude/settings.json`` so hooks travel with the repo:
+
+    - ``PostToolUse`` ``Edit|Write|MultiEdit`` → ``repoctx update --from-claude-hook``
+      (keeps the embedding index live)
+    - ``UserPromptSubmit`` → ``repoctx hook prompt-nudge``
+      (task-entry nudge: ``bundle`` reminder for substantive prompts)
+    - ``Stop`` → ``repoctx hook stop-check``
+      (task-exit nudge: ``validate_plan`` reminder if edits happened)
+
+    Idempotent. Each entry is detected by command prefix and skipped on
+    re-install. Unrelated user-authored hooks under the same event are
+    preserved. The function name and signature are kept stable for callers
+    that already depend on them.
     """
     settings_dir = root / ".claude"
     settings_dir.mkdir(parents=True, exist_ok=True)
@@ -412,25 +485,77 @@ def _ensure_post_tool_hook(root: Path) -> tuple[Path, bool]:
         settings = {}
 
     hooks = settings.setdefault("hooks", {})
-    post_tool = hooks.setdefault("PostToolUse", [])
+    if not isinstance(hooks, dict):
+        hooks = {}
+        settings["hooks"] = hooks
 
-    for entry in post_tool:
+    changed = False
+    changed |= _ensure_hook_entry(
+        hooks,
+        event="PostToolUse",
+        command=HOOK_COMMAND,
+        matcher=HOOK_MATCHER,
+        command_prefix="repoctx update",
+    )
+    changed |= _ensure_hook_entry(
+        hooks,
+        event="UserPromptSubmit",
+        command=PROMPT_NUDGE_COMMAND,
+        matcher=None,
+        command_prefix=PROMPT_NUDGE_COMMAND,
+    )
+    changed |= _ensure_hook_entry(
+        hooks,
+        event="Stop",
+        command=STOP_CHECK_COMMAND,
+        matcher=None,
+        command_prefix=STOP_CHECK_COMMAND,
+    )
+
+    if changed:
+        path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    return path, changed
+
+
+def _ensure_hook_entry(
+    hooks: dict,
+    *,
+    event: str,
+    command: str,
+    matcher: str | None,
+    command_prefix: str,
+) -> bool:
+    """Append a hook entry under ``hooks[event]`` unless one already exists.
+
+    "Already exists" = some entry under that event carries a command that
+    starts with ``command_prefix``. When ``matcher`` is given, the search
+    is narrowed to entries with that matcher; when ``None``, any entry
+    under the event counts. Returns True iff the list was mutated.
+    """
+    entries = hooks.setdefault(event, [])
+    if not isinstance(entries, list):
+        entries = []
+        hooks[event] = entries
+
+    for entry in entries:
         if not isinstance(entry, dict):
             continue
-        if entry.get("matcher") != HOOK_MATCHER:
+        if matcher is not None and entry.get("matcher") != matcher:
             continue
         for h in entry.get("hooks", []) or []:
-            if isinstance(h, dict) and h.get("command", "").startswith("repoctx update"):
-                return path, False
+            if not isinstance(h, dict):
+                continue
+            cmd = h.get("command")
+            if isinstance(cmd, str) and cmd.startswith(command_prefix):
+                return False
 
-    post_tool.append(
-        {
-            "matcher": HOOK_MATCHER,
-            "hooks": [{"type": "command", "command": HOOK_COMMAND}],
-        }
-    )
-    path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
-    return path, True
+    new_entry: dict[str, object] = {
+        "hooks": [{"type": "command", "command": command}],
+    }
+    if matcher is not None:
+        new_entry["matcher"] = matcher
+    entries.append(new_entry)
+    return True
 
 
 __all__ = [
@@ -450,8 +575,12 @@ __all__ = [
     "InstallResult",
     "NUDGE_BLOCK",
     "NUDGE_MARKER",
+    "NUDGE_MARKER_V1",
+    "NUDGE_MARKER_V2",
     "NudgeResult",
     "POINTER_MARKER",
+    "PROMPT_NUDGE_COMMAND",
+    "STOP_CHECK_COMMAND",
     "POINTER_TEMPLATE",
     "ensure_claude_md_nudge",
     "install_claude_code",

@@ -8,6 +8,7 @@ Each module exposes:
 
 from repoctx.commands import (
     experiment,
+    hook,
     index,
     install,
     protocol_ops,
@@ -37,6 +38,7 @@ COMMAND_MODULES = [
     install.init_authority_cmd,
     install.propose_authority_cmd,
     stats,
+    hook.hook_cmd,
 ]
 
 COMMAND_HANDLERS = {mod.NAME: mod.run for mod in COMMAND_MODULES}
