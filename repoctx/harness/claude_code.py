@@ -33,6 +33,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from repoctx.config import DEFAULT_CONFIG, RepoCtxConfig
+
 AGENTS_SECTION_HEADER = "## Ground truth (repoctx)"
 
 EMBEDDING_UPKEEP_BLURB = """### Embedding upkeep
@@ -114,11 +116,12 @@ CLAUDE_MD_NUDGE_BLOCK = NUDGE_BLOCK
 
 ENV_DISABLE_CLAUDE_MD_NUDGE = "REPOCTX_NO_CLAUDE_MD_NUDGE"
 
-# Files whose content is mostly an import directive plus at most this many
+# Files whose content is mostly an import directive plus at most a few
 # substantive lines (non-blank, non-import, non-comment) are treated as
-# pointers. One line allows for a single title like ``# Project``.
+# pointers. The substantive-line ceiling is now a config knob
+# (``RepoCtxConfig.pointer_max_substantive_lines``); the default of 1 covers
+# the canonical "title + import" case.
 _POINTER_MAX_BYTES = 500
-_POINTER_MAX_SUBSTANTIVE_LINES = 1
 
 
 # Action enum (string values so they serialize cleanly into JSON).
@@ -205,6 +208,7 @@ def install_claude_code(
     repo_root: str | Path = ".",
     *,
     claude_md_nudge: bool = True,
+    config: RepoCtxConfig = DEFAULT_CONFIG,
 ) -> InstallResult:
     root = Path(repo_root).resolve()
     agents_md, agents_changed = _ensure_agents_section(root)
@@ -212,7 +216,7 @@ def install_claude_code(
     settings_path, settings_changed = _ensure_post_tool_hook(root)
     nudge: NudgeResult | None = None
     if claude_md_nudge:
-        nudge = ensure_claude_md_nudge(root)
+        nudge = ensure_claude_md_nudge(root, config=config)
     return InstallResult(
         agents_md=agents_md,
         agents_md_changed=agents_changed,
@@ -231,6 +235,7 @@ def ensure_claude_md_nudge(
     repo_root: str | Path = ".",
     *,
     enabled: bool = True,
+    config: RepoCtxConfig = DEFAULT_CONFIG,
 ) -> NudgeResult:
     """Place the anchored repoctx-nudge block per the file layout.
 
@@ -266,8 +271,8 @@ def ensure_claude_md_nudge(
             agents_md_action=ACTION_SKIPPED,
         )
 
-    claude_state = _classify_md(claude_md, AGENTS_MD_FILENAME)
-    agents_state = _classify_md(agents_md, CLAUDE_MD_FILENAME)
+    claude_state = _classify_md(claude_md, AGENTS_MD_FILENAME, config=config)
+    agents_state = _classify_md(agents_md, CLAUDE_MD_FILENAME, config=config)
 
     claude_action = ACTION_SKIPPED if claude_state == "absent" else ACTION_NO_OP
     agents_action = ACTION_SKIPPED if agents_state == "absent" else ACTION_NO_OP
@@ -296,13 +301,20 @@ def ensure_claude_md_nudge(
     )
 
 
-def _classify_md(path: Path, other_filename: str) -> str:
+def _classify_md(
+    path: Path,
+    other_filename: str,
+    *,
+    config: RepoCtxConfig = DEFAULT_CONFIG,
+) -> str:
     """Return ``"absent"`` | ``"pointer"`` | ``"content"`` for a markdown file.
 
     A file is a *pointer* if it carries the repoctx pointer marker (we created
     it) **or** is short enough to be a hand-written one-liner (≤500 bytes
-    total, contains an ``@OTHER.md`` import line, and has at most one
-    substantive non-import non-comment line — typically a title).
+    total, contains an ``@OTHER.md`` import line, and has at most
+    ``config.pointer_max_substantive_lines`` substantive non-import
+    non-comment lines — typically a title, optionally plus a small number
+    of file-specific notes).
     """
     if not path.exists():
         return "absent"
@@ -322,7 +334,7 @@ def _classify_md(path: Path, other_filename: str) -> str:
         and not line.strip().startswith("@")
         and not line.strip().startswith("<!--")
     ]
-    if len(substantive) <= _POINTER_MAX_SUBSTANTIVE_LINES:
+    if len(substantive) <= config.pointer_max_substantive_lines:
         return "pointer"
     return "content"
 

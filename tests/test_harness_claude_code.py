@@ -7,6 +7,9 @@ from pathlib import Path
 
 import pytest
 
+from dataclasses import replace
+
+from repoctx.config import DEFAULT_CONFIG
 from repoctx.harness import (
     AGENTS_SECTION_HEADER,
     ensure_claude_md_nudge,
@@ -166,6 +169,75 @@ def test_classify_md_content_no_import(tmp_path: Path) -> None:
     path = tmp_path / "CLAUDE.md"
     path.write_text("# Project\n\nSome notes.\n")
     assert _classify_md(path, "AGENTS.md") == "content"
+
+
+# -- _classify_md: pointer_max_substantive_lines knob -------------------------
+
+
+def test_classify_md_threshold_raised_treats_title_plus_one_note_as_pointer(
+    tmp_path: Path,
+) -> None:
+    """The edge case from the v1.2.0 follow-up: a hand-written CLAUDE.md with
+    a title + ``@AGENTS.md`` import + one Claude-specific note has 2
+    substantive lines, which the default threshold (1) classifies as
+    ``content`` so the nudge block lands there. Raising the threshold to 2
+    flips it back to ``pointer`` so the nudge stays in AGENTS.md only.
+    """
+    path = tmp_path / "CLAUDE.md"
+    path.write_text(
+        "# Project\n\n@AGENTS.md\n\nClaude-specific note: use bun, not npm.\n"
+    )
+    # Default → content (existing behavior).
+    assert _classify_md(path, "AGENTS.md") == "content"
+    # Threshold=2 → pointer.
+    cfg = replace(DEFAULT_CONFIG, pointer_max_substantive_lines=2)
+    assert _classify_md(path, "AGENTS.md", config=cfg) == "pointer"
+
+
+def test_classify_md_threshold_zero_treats_bare_import_as_pointer(
+    tmp_path: Path,
+) -> None:
+    """A bare ``@OTHER.md`` import has 0 substantive lines, so it stays a
+    pointer even with the threshold tightened to 0. This pins the lower
+    bound: the import-only file is never reclassified as content.
+    """
+    path = tmp_path / "CLAUDE.md"
+    path.write_text("@AGENTS.md\n")
+    cfg = replace(DEFAULT_CONFIG, pointer_max_substantive_lines=0)
+    assert _classify_md(path, "AGENTS.md", config=cfg) == "pointer"
+
+
+def test_classify_md_threshold_zero_demotes_title_plus_import_to_content(
+    tmp_path: Path,
+) -> None:
+    """Threshold=0 means *any* substantive line (including a title) flips
+    the file to ``content``. Useful for users who want repoctx to never
+    treat a hand-written CLAUDE.md as a pointer.
+    """
+    path = tmp_path / "CLAUDE.md"
+    path.write_text("# Project\n\n@AGENTS.md\n")
+    cfg = replace(DEFAULT_CONFIG, pointer_max_substantive_lines=0)
+    assert _classify_md(path, "AGENTS.md", config=cfg) == "content"
+
+
+def test_ensure_nudge_threshold_keeps_curated_claude_md_as_pointer(
+    tmp_path: Path,
+) -> None:
+    """End-to-end: with threshold=2, a curated CLAUDE.md (title + import +
+    one note) is treated as a pointer, so the nudge block lands in
+    AGENTS.md only and CLAUDE.md is left byte-identical.
+    """
+    (tmp_path / "CLAUDE.md").write_text(
+        "# Project\n\n@AGENTS.md\n\nUse bun, not npm.\n"
+    )
+    (tmp_path / "AGENTS.md").write_text("# Agents\n\nProject conventions.\n")
+    claude_snapshot = (tmp_path / "CLAUDE.md").read_bytes()
+    cfg = replace(DEFAULT_CONFIG, pointer_max_substantive_lines=2)
+    result = ensure_claude_md_nudge(tmp_path, config=cfg)
+    assert result.claude_md_action == ACTION_NO_OP
+    assert result.agents_md_action == ACTION_NUDGE_INSERTED
+    assert (tmp_path / "CLAUDE.md").read_bytes() == claude_snapshot
+    assert NUDGE_MARKER in (tmp_path / "AGENTS.md").read_text()
 
 
 # -- ensure_claude_md_nudge: dispatch matrix -----------------------------------

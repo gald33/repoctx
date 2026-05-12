@@ -6,6 +6,24 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added — configurable `_classify_md` substantive-line threshold
+
+The 1.2.0 nudge placement matrix classifies a short markdown file as a
+*pointer* when it carries an `@OTHER.md` import line and has at most one
+substantive non-import non-comment line — typically a single title. In
+practice, real-world CLAUDE.md files often carry a title plus one
+Claude-specific note (e.g., "use bun, not npm") in addition to the
+`@AGENTS.md` import, which puts them at 2 substantive lines and flips
+them to `content`. Result: the repoctx nudge block lands inside a
+hand-curated CLAUDE.md instead of staying in AGENTS.md, which isn't what
+the user usually wants.
+
+- New `RepoCtxConfig` field `pointer_max_substantive_lines: int = 1`.
+  Raise to 2 to also treat "title + import + one note" as a pointer.
+- `_classify_md`, `ensure_claude_md_nudge`, and `install_claude_code`
+  accept a `config: RepoCtxConfig = DEFAULT_CONFIG` argument and read
+  the threshold from it. Default behavior is unchanged.
+
 ### Added — task-entry / task-exit nudges via Claude Code hooks
 
 Telemetry from active consumer repos showed that even with the v1 anchored
