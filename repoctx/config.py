@@ -100,6 +100,14 @@ class RepoCtxConfig:
     # (cosine 0–1) and the lexical heuristic becomes a small tiebreaker. This
     # weight scales the normalized lexical score before adding it to cosine.
     lexical_tiebreak_weight: float = 0.05
+    # Pointer classification (harness/claude_code.py::_classify_md). A short
+    # markdown file with an `@OTHER.md` import is treated as a thin pointer
+    # when it has at most this many substantive (non-blank, non-import,
+    # non-comment) lines. Default 1 covers the canonical "title + import"
+    # case. Raise to 2 to also treat "title + import + one Claude-specific
+    # note" as a pointer, so the repoctx nudge block keeps landing in
+    # AGENTS.md instead of being inserted into a hand-curated CLAUDE.md.
+    pointer_max_substantive_lines: int = 1
 
 
 DEFAULT_CONFIG = RepoCtxConfig()
