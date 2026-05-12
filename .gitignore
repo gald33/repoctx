@@ -6,3 +6,9 @@ __pycache__/
 .repoctx/
 build/
 dist/
+
+# Claude Code: personal config + transient session state. The committable
+# project-level config (.claude/settings.json) — which `repoctx install` itself
+# writes — is intentionally NOT ignored.
+.claude/*.local.json
+.claude/worktrees/

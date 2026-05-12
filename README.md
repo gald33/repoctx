@@ -247,6 +247,22 @@ All installers are idempotent; existing AGENTS.md content and other MCP servers 
 
 > **Embedding index**: `repoctx install` automatically builds the embedding index when the `[embeddings]` extras are importable (one-command setup). Pass `--no-index` to skip it, or `--with-index` to require a build (errors if extras are missing). The first build downloads the model (~1.2 GB).
 
+### Claude Code hook integration
+
+`repoctx install-claude-code` (and `repoctx install`) writes three entries to `.claude/settings.json` so the agent gets harness-level nudges to actually call repoctx:
+
+- `PostToolUse` matching `Edit|Write|MultiEdit` → `repoctx update --from-claude-hook` (keeps the embedding index live after every edit).
+- `UserPromptSubmit` → `repoctx hook prompt-nudge` (task-entry: for substantive prompts, reminds the agent to call `mcp__repoctx__bundle` before proposing a plan).
+- `Stop` → `repoctx hook stop-check` (task-exit: if the turn made `Edit/Write/MultiEdit` calls but did not call `mcp__repoctx__validate_plan`, reminds the agent to run it before stopping).
+
+Both nudges read Claude Code's hook JSON from stdin and always exit 0 — they never block the user's flow. The entry nudge stays silent for short, keyword-free prompts; the exit nudge stays silent when there were no edits, or when `validate_plan` was already called this turn. Hook entries are detected by command prefix on re-install, so running `repoctx install` again is safe.
+
+The anchored `<!-- repoctx-nudge -->` block placed in CLAUDE.md / AGENTS.md ships with v2 wording (**must call** + an inline definition of "non-trivial"). v1 blocks (older installs) are rewritten in place to v2 on the next `install` / `refresh` without touching surrounding doc content.
+
+**Dev-only `REPOCTX_LEARN=1`**: when set in the Claude Code environment, both hooks append `If you decide to skip this, briefly state the reason.` to the reminder so you can collect skip rationale across a tuning week. Leave it unset in regular use — every non-trivial turn would otherwise pay a small token tax on reminder prose.
+
+**Opt out**: delete the relevant entries from `.claude/settings.json` and they will not be re-added unless the same install command is re-run. To skip the anchored-block insertion specifically, pass `--no-claude-md-nudge` or set `REPOCTX_NO_CLAUDE_MD_NUDGE=1`.
+
 ### Repo conventions
 
 RepoCtx v2 looks for (all optional, all lightweight):
