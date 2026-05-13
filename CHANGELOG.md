@@ -6,6 +6,19 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-05-13
+
+### Documentation
+
+- **README rewrite around the ground-truth-bundle framing.** Restructured
+  for the actual reader path (problem → bundle → install → setup → tools →
+  details), consolidated the three near-identical editor setup blocks, and
+  promoted the Ground-Truth Bundle to the headline. Added a top-of-file
+  callout pointing AI agents at `AGENTS.md`. Moved controlled experiment
+  mode and v1/migration notes into an appendix so the main body reads
+  forward-looking. Trimmed from 614 to ~340 lines without dropping
+  technical content.
+
 ### Added — task-entry / task-exit nudges via Claude Code hooks
 
 Telemetry from active consumer repos showed that even with the v1 anchored
