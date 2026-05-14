@@ -44,6 +44,7 @@ SUBSTANTIVE_KEYWORDS = re.compile(
 )
 
 EDIT_TOOL_NAMES = frozenset({"Edit", "Write", "MultiEdit"})
+TRACKED_TOOL_NAMES = frozenset({"Read", "Edit", "Write", "MultiEdit"})
 VALIDATE_PLAN_TOOL = "mcp__repoctx__validate_plan"
 
 # Cap how far back we scan the transcript when we cannot identify the
@@ -115,6 +116,12 @@ def handle_stop(
         return HookOutput()
 
     edits, validates = count_turn_tool_uses(text)
+
+    # Best-effort reap on every Stop so the git-diff fallback signal closes
+    # the loop for IDEs without PostToolUse hooks (Cursor, Codex). Silent;
+    # never blocks the nudge logic.
+    _try_reap(os.getcwd())
+
     if edits > 0 and validates == 0:
         msg = EXIT_REMINDER
         if _learn_enabled(env):
@@ -123,8 +130,117 @@ def handle_stop(
     return HookOutput()
 
 
+def _try_reap(cwd: str) -> None:
+    try:
+        from repoctx.reaper import reap
+        reap(cwd)
+    except Exception:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).debug("Stop-hook reap failed", exc_info=True)
+
+
 def _read_transcript(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
+
+
+def handle_tool_use(
+    payload: dict,
+    *,
+    cwd: str | None = None,
+) -> HookOutput:
+    """PostToolUse handler for Read/Edit/Write/MultiEdit — append a feedback event.
+
+    Resolves the repo root from the payload (when Claude Code supplies it) or
+    falls back to walking up from cwd for a ``.git`` marker. Attributes to the
+    most-recent matching bundle by scanning the per-repo feedback log; events
+    that don't match any bundle are still written with ``bundle_id=null`` so
+    the tuner has a denominator for "tool uses outside any bundle".
+
+    Always returns an empty HookOutput — this handler is silent by design.
+    Errors are swallowed (logged at debug) so a broken feedback log can't
+    block the user's flow.
+    """
+    try:
+        tool_name = payload.get("tool_name") or payload.get("toolName")
+        if not isinstance(tool_name, str) or tool_name not in TRACKED_TOOL_NAMES:
+            return HookOutput()
+        file_path = _extract_hook_file_path(payload)
+        if not file_path:
+            return HookOutput()
+        repo_root = _resolve_hook_repo_root(payload, cwd, file_path)
+        if repo_root is None:
+            return HookOutput()
+        rel_path = _relativize(file_path, repo_root)
+        if rel_path is None:
+            return HookOutput()
+        from repoctx.feedback_log import append_event, find_recent_bundle_for_path
+
+        bundle_id = find_recent_bundle_for_path(repo_root, rel_path)
+        append_event(
+            repo_root,
+            {
+                "event_type": "tool_use",
+                "bundle_id": bundle_id,
+                "path": rel_path,
+                "action": tool_name,
+                "source": "hook",
+                "repo_root": str(repo_root),
+            },
+        )
+    except Exception:  # noqa: BLE001 — never break the user's flow
+        import logging
+        logging.getLogger(__name__).debug("handle_tool_use failed", exc_info=True)
+    return HookOutput()
+
+
+def _extract_hook_file_path(payload: dict) -> str | None:
+    tool_input = payload.get("tool_input") or payload.get("toolInput") or {}
+    if isinstance(tool_input, dict):
+        for key in ("file_path", "filePath", "path"):
+            val = tool_input.get(key)
+            if isinstance(val, str) and val.strip():
+                return val
+    val = payload.get("file_path") or payload.get("path")
+    return val if isinstance(val, str) and val.strip() else None
+
+
+def _resolve_hook_repo_root(payload: dict, cwd: str | None, file_path: str) -> Path | None:
+    """Best-effort repo-root resolution for the feedback hook.
+
+    Order: payload.cwd / workspace fields → ``cwd`` arg → walk up from
+    ``file_path`` looking for ``.git``. Returns None if nothing matches —
+    callers treat None as "skip event".
+    """
+    for key in ("cwd", "workspace_root", "repo_root"):
+        val = payload.get(key)
+        if isinstance(val, str) and val.strip():
+            candidate = Path(val).expanduser()
+            if candidate.is_dir():
+                return candidate.resolve()
+    if cwd:
+        candidate = Path(cwd).expanduser()
+        if candidate.is_dir():
+            resolved = candidate.resolve()
+            if (resolved / ".git").exists():
+                return resolved
+    # Walk up from the file path looking for .git as a last resort.
+    p = Path(file_path).expanduser()
+    if p.is_absolute():
+        for parent in [p, *p.parents]:
+            if (parent / ".git").exists():
+                return parent.resolve()
+    return None
+
+
+def _relativize(file_path: str, repo_root: Path) -> str | None:
+    p = Path(file_path).expanduser()
+    if not p.is_absolute():
+        # Already relative — assume it's relative to repo_root.
+        return str(p)
+    try:
+        return str(p.resolve().relative_to(repo_root))
+    except ValueError:
+        return None
 
 
 def count_turn_tool_uses(transcript_text: str) -> tuple[int, int]:
@@ -236,14 +352,22 @@ def cli_stop_check() -> int:
     return 0
 
 
+def cli_tool_use() -> int:
+    _emit(handle_tool_use(_read_stdin_json(), cwd=os.getcwd()))
+    return 0
+
+
 __all__ = [
     "ENTRY_REMINDER",
     "EXIT_REMINDER",
     "SKIP_REASON_SUFFIX",
     "HookOutput",
+    "TRACKED_TOOL_NAMES",
     "cli_prompt_nudge",
     "cli_stop_check",
+    "cli_tool_use",
     "count_turn_tool_uses",
     "handle_prompt_submit",
     "handle_stop",
+    "handle_tool_use",
 ]

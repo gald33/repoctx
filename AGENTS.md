@@ -47,3 +47,14 @@ For any non-trivial task in this repo:
 
 Every repoctx response includes `when_to_recall_repoctx` and `before_finalize_checklist`. Follow them.
 
+
+<!-- repoctx-nudge:v2 -->
+> **repoctx is installed for this repo.** For any non-trivial task you
+> **must call** `mcp__repoctx__bundle(task)` before proposing a plan, and
+> `mcp__repoctx__validate_plan` + `mcp__repoctx__risk_report` before
+> declaring done. Use `mcp__repoctx__authority(task)` if unsure whether
+> a change violates a constraint.
+>
+> **Non-trivial = touches >1 file OR introduces new behavior OR
+> adds/removes a public API.** Single-file typo/rename/comment-only
+> changes are trivial.

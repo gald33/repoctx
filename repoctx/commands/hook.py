@@ -38,16 +38,26 @@ def _register(subparsers) -> None:
             "repoctx.validate_plan"
         ),
     )
+    sub.add_parser(
+        "tool-use",
+        help=(
+            "PostToolUse: append a tool_use feedback event for "
+            "Read/Edit/Write/MultiEdit so the Phase 3 tuner can fit per-kind "
+            "retrieval thresholds"
+        ),
+    )
 
 
 def _run(args: argparse.Namespace) -> None:
-    from repoctx.hooks import cli_prompt_nudge, cli_stop_check
+    from repoctx.hooks import cli_prompt_nudge, cli_stop_check, cli_tool_use
 
     hook_command = getattr(args, "hook_command", None)
     if hook_command == "prompt-nudge":
         raise SystemExit(cli_prompt_nudge())
     if hook_command == "stop-check":
         raise SystemExit(cli_stop_check())
+    if hook_command == "tool-use":
+        raise SystemExit(cli_tool_use())
     # No sub-action given — print top-level help and exit 2 (usage error).
     raise SystemExit(2)
 

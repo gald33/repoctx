@@ -167,7 +167,7 @@ def test_ranked_path_has_score_breakdown(tmp_path: Path) -> None:
     # tiebreak. Score must be at least the cosine and bounded above by
     # cosine + tiebreak weight.
     assert login.score >= 0.75
-    assert login.score <= 0.75 + DEFAULT_CONFIG.lexical_tiebreak_weight + 1e-6
+    assert login.score <= 0.75 + DEFAULT_CONFIG.lexical_tiebreak_for("code") + 1e-6
 
     d = login.to_dict(include_debug=True)
     assert "heuristic_score" in d

@@ -13,6 +13,14 @@ logger = logging.getLogger(__name__)
 
 def op_bundle(task: str, repo_root: str | Path = ".", *, include_full_text: bool = False) -> dict[str, Any]:
     _flush_pending_embeddings(repo_root)
+    # Lazy reap before emitting a new bundle so any prior bundle's edits get
+    # attributed before the new ranked_paths shifts the attribution window.
+    # Silent on failure — feedback is a side-channel, never blocks bundling.
+    try:
+        from repoctx.reaper import reap
+        reap(repo_root)
+    except Exception:
+        logger.debug("Pre-bundle reap failed", exc_info=True)
     embedding_scores = _embedding_scores_for(task, repo_root)
     bundle = build_bundle(task, repo_root=repo_root, embedding_scores=embedding_scores)
     return bundle.to_dict(include_full_text=include_full_text)

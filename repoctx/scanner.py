@@ -4,6 +4,7 @@ from pathlib import Path, PurePosixPath
 
 from repoctx.config import DEFAULT_CONFIG, DOC_PRIORITY, RepoCtxConfig
 from repoctx.models import FileRecord, RepositoryIndex
+from repoctx.subkinds import classify_subkind
 
 logger = logging.getLogger(__name__)
 
@@ -25,11 +26,13 @@ def scan_repository(
         kind = _classify_file(rel_path, extension, config)
         doc_score = _score_doc(rel_path) if kind == "doc" else 0.0
         content = _read_text(path, config.max_file_bytes)
+        subkind = classify_subkind(kind, rel_path, content)
         record = FileRecord(
             path=rel_path,
             absolute_path=path,
             extension=extension,
             kind=kind,
+            subkind=subkind,
             content=content,
             doc_score=doc_score,
         )

@@ -12,6 +12,10 @@ class FileRecord:
     absolute_path: Path
     extension: str
     kind: FileKind
+    # Refined bucket within kind ("handler", "model", "cli", "build", ...).
+    # Empty when the parent kind isn't subclassified (test, other) or when
+    # no detector matched. See `repoctx/subkinds.py`.
+    subkind: str = ""
     content: str = ""
     doc_score: float = 0.0
 
@@ -42,6 +46,10 @@ class RankedPath:
     snippet: str | None = None
     heuristic_score: float = 0.0
     embedding_score: float = 0.0
+    # Threaded through from FileRecord so the bundle event log captures the
+    # full ``kind/subkind`` key without re-classifying at emission time.
+    kind: str = ""
+    subkind: str = ""
 
     def to_dict(self, include_debug: bool = False) -> dict[str, Any]:
         data: dict[str, Any] = {

@@ -47,6 +47,13 @@ def before_finalize_checklist(
         checklist.append("Verify each invariant in validation_plan.invariants_to_verify.")
     if any(c.severity == "hard" for c in constraints):
         checklist.append("Re-read every hard constraint and confirm the diff does not violate it.")
+    checklist.append(
+        "Call repoctx.mark_used(bundle_id, labels) with graded relevance "
+        "(`informed_edit` / `informed_context` / `noise`) for each file in "
+        "relevant_code — this is the only signal that captures Reads that "
+        "shaped edits elsewhere, and it teaches the per-repo retriever to "
+        "stop shipping files that didn't earn their slot."
+    )
     return checklist
 
 

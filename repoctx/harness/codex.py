@@ -11,6 +11,7 @@ evolves; the AGENTS.md section is what actually guides the agent.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from repoctx.harness.claude_code import (
@@ -43,12 +44,15 @@ def _ensure_codex_mcp(root: Path) -> tuple[Path, bool]:
     else:
         config = {}
     servers = config.setdefault("mcpServers", {})
-    if MCP_SERVER_NAME in servers:
-        return path, False
-    servers[MCP_SERVER_NAME] = {
-        "command": "python",
+    # Pin to the interpreter that ran ``repoctx install`` — the host launches
+    # the MCP server via the shell, whose PATH may not include the venv.
+    desired = {
+        "command": sys.executable,
         "args": ["-m", "repoctx.mcp_server", "--repo", str(root)],
     }
+    if servers.get(MCP_SERVER_NAME) == desired:
+        return path, False
+    servers[MCP_SERVER_NAME] = desired
     codex_dir.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     return path, True
