@@ -32,6 +32,23 @@ When the control lane is active, RepoCtx may **stub** `get_task_context` (empty 
 - Suppression logic: `repoctx/experiment_mcp.py`
 - MCP tool: `repoctx/mcp_server.py`
 
+## Releasing to PyPI
+
+Releases are fully automated by `.github/workflows/publish-pypi.yml`. **Do not run `twine upload` locally** — the workflow uses PyPI Trusted Publishing (OIDC), there's no token in `~/.pypirc`, and a manual upload either fails with `EOFError` (no TTY in agent contexts) or, if creds happen to be set, just duplicates what the workflow already did.
+
+Full release flow:
+
+1. Land the feature on `main` (squash-merge the PR).
+2. Bump `project.version` in `pyproject.toml`.
+3. Add a `[<x.y.z>] — YYYY-MM-DD` entry to `CHANGELOG.md` above the prior release.
+4. Commit (`chore(release): <x.y.z> — <one-line summary>`) and push to `main`.
+5. Tag the release commit locally: `git tag v<x.y.z>` (must match `project.version` exactly — the workflow's tag-vs-version check fails otherwise).
+6. Push the tag: `git push origin v<x.y.z>`. That push triggers the workflow.
+
+The workflow fires on `v*` tag push, verifies tag-vs-version, builds wheel + sdist, and publishes via OIDC. Typical run is ~40s. Verify with `gh run list --limit 1` or `curl -fsSL https://pypi.org/pypi/repoctx-mcp/json | jq -r .info.version`.
+
+If the verification step fails (tag doesn't match `project.version`), delete the broken tag (`git tag -d v<x.y.z>` and `git push --delete origin v<x.y.z>`), fix the mismatch, retag, push.
+
 ## Telemetry privacy
 
 Task strings and repo paths are **hashed** in default telemetry; do not assume plaintext queries are stored. See README **Telemetry** section.
