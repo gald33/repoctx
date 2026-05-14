@@ -6,6 +6,95 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-05-14
+
+### Added — per-repo retrieval tuning loop (feedback events + MAP-fit model)
+
+Replaces the fixed `embedding_qualify_threshold = 0.3` with a learned
+per-(kind, subkind) threshold fit from observed agent behavior. Closes the
+loop locally: collect feedback while you work → `repoctx eval` to inspect →
+`repoctx tune` to fit → loader picks up the result on the next bundle.
+
+- **Per-repo config** at `<repo>/.repoctx/config.json` plus
+  `REPOCTX_QUALIFY_THRESHOLD_<KIND>` / `REPOCTX_LEXICAL_TIEBREAK_<KIND>` env
+  vars. Hierarchical threshold lookup (`code/handler` → `code` → `_default`)
+  so subkind-specific tuning is "free" once a cell collects labels and
+  silently inactive otherwise. Opt-out with `"feedback_enabled": false`.
+
+- **Feedback log** at `<repo>/.repoctx/feedback-events.jsonl`. Three signal
+  sources, each tagged with provenance so the tuner can weight them:
+  - **PostToolUse hook** (`repoctx hook tool-use`) — silent
+    `Read|Edit|Write|MultiEdit` handler. Attributes to the most recent
+    matching bundle within a 30-min / 200-tool-use window. Auto-wired by
+    `repoctx install` as a second PostToolUse entry alongside the existing
+    embedding-upkeep hook.
+  - **`mark_used` MCP tool** — graded relevance (`informed_edit` /
+    `informed_context` / `noise`). The LLM judge is the only signal that
+    captures "I read A and it shaped my edit of B" — structurally invisible
+    to hooks and git-diff. Suggested via the bundle's
+    `before_finalize_checklist`.
+  - **Git-diff reaper** (`repoctx reap`, plus auto-runs on `Stop` and at the
+    next `bundle`) — universal fallback for IDEs without PostToolUse hooks.
+    Enumerates `git worktree list --porcelain`, idempotent via per-bundle
+    dedup.
+
+- **`repoctx eval`** — joins `tool_use` / `self_report` / `git_edit` events
+  back to `bundle_emitted` by `bundle_id`. Reports per-(kind, subkind)
+  precision-ish (fraction of bundle used), recall-ish (fraction of touched
+  paths bundled), and explicit noise rate from `mark_used`.
+
+- **`repoctx tune`** — 1-D Bayesian MAP grid search per cell. Provenance
+  weights: hook+Edit=1.0, git=0.8, self_report `informed_edit`=0.9 /
+  `informed_context`=0.7 / `noise`=1.0, hook-Read-only=0.3. 30-day half-life
+  decay. Strong Gaussian prior (σ=0.07) on the configured default — works
+  at ~10–50 labels per cell without overfitting. Two-pass hierarchical fit
+  so subkinds shrink toward the parent kind's evidence. `--dry-run` (default)
+  prints proposed deltas; `--apply` writes to the `learned` block in
+  `.repoctx/config.json`.
+
+- **Exploration budget** (`exploration_epsilon = 0.05`) — retriever
+  occasionally surfaces 1–2 sub-threshold near-miss embedding candidates
+  per bundle so the tuner can observe what the current threshold filters
+  out. Without this the loop is structurally blind to "lower the threshold"
+  signals.
+
+- **Subkind classifier** — deterministic, no ML. Path patterns plus light
+  import-sniffing (`fastapi`/`flask`/`pydantic`/`argparse`/`GENERATED`
+  markers). `code: handler/model/cli/util/scaffold/generated/other`,
+  `doc: agent_contract/architecture/readme/other`,
+  `config: build/ci/lint/other`. `test` stays flat (geometry inside tests
+  is less differentiated).
+
+- **Bundle schema bump** to `repoctx-bundle/2`: adds a stable `id` field
+  (uuid hex16) for feedback-event attribution. Backwards-compatible field
+  addition — existing consumers that read documented fields keep working.
+
+### Fixed — installer pinned to `sys.executable`
+
+Hooks and `.mcp.json` previously wrote bare `repoctx` / `python` commands,
+which silently no-op'd on venv / pipx / uv installs because Claude Code
+launches hooks and the MCP server via the user's shell, whose `PATH` may
+not include the install prefix. Now writes the absolute interpreter path
+that ran `repoctx install`, in all three harnesses (Claude Code, Cursor,
+Codex).
+
+`_ensure_hook_entry` and the MCP config writers detect stale bare-command
+entries from prior installs and **upgrade them in place** on the next
+`repoctx install`. Users who already installed an older version just
+re-run install once to self-heal.
+
+### Notes
+
+- 92 new tests across `feedback_log`, `mark_used`, hook handler, reaper,
+  eval, tune (incl. provenance weighting + time decay), exploration budget,
+  subkind classifier, hierarchical threshold lookup, and end-to-end tune
+  fallback chain. 0 regressions on the rest of the suite.
+- Optimization target is **alignment, not truth**: the tuner fits "what the
+  LLM finds useful given what we ship", not "what was objectively correct".
+  Outcome signals (PR merge / revert / CI) are deliberately out of scope —
+  documented in `tune.py`'s module docstring along with the other honest
+  caveats (exposure bias, self-attribution noise, thin per-repo data).
+
 ## [1.3.0] — 2026-05-13
 
 ### Documentation
