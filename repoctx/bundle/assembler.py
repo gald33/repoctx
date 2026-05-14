@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path, PurePosixPath
 from time import perf_counter
 from typing import Any
+from uuid import uuid4
 
 from repoctx.authority.constraints import Constraint
 from repoctx.authority.discovery import AuthorityProducer
@@ -23,6 +24,7 @@ from repoctx.bundle.schema import (
     ValidationPlan,
 )
 from repoctx.config import DEFAULT_CONFIG, RepoCtxConfig
+from repoctx.feedback_log import append_event
 from repoctx.git_state import collect_state
 from repoctx.models import RankedPath
 from repoctx.retriever import get_task_context
@@ -31,15 +33,24 @@ from repoctx.retriever import get_task_context
 def build_bundle(
     task: str,
     repo_root: str | Path = ".",
-    config: RepoCtxConfig = DEFAULT_CONFIG,
+    config: RepoCtxConfig | None = None,
     *,
     max_authority_records: int = 12,
     max_code_refs: int = 10,
     embedding_scores: dict[str, float] | None = None,
 ) -> GroundTruthBundle:
-    """Assemble a ground-truth bundle for ``task``."""
+    """Assemble a ground-truth bundle for ``task``.
+
+    When ``config`` is None, per-repo retrieval knobs are loaded from
+    ``<repo_root>/.repoctx/config.json`` (falling back to defaults if absent).
+    Callers wanting to bypass that — e.g., tests pinning to a known config —
+    can pass ``DEFAULT_CONFIG`` explicitly.
+    """
     started = perf_counter()
     repo_path = Path(repo_root).resolve()
+    if config is None:
+        from repoctx.config_loader import load_repo_config
+        config = load_repo_config(repo_path)
 
     # Authority discovery.
     producer = AuthorityProducer(repo_path, config=config)
@@ -66,9 +77,11 @@ def build_bundle(
     edit_scope = _compute_scope(context.relevant_files, authority_records, constraints)
     validation_plan = _compute_validation_plan(context.related_tests, constraints)
 
+    bundle_id = uuid4().hex[:16]
     bundle = GroundTruthBundle(
         task_summary=task[:240],
         task_raw=task,
+        id=bundle_id,
         authoritative_records=authority_records,
         constraints=constraints,
         relevant_code=relevant_code,
@@ -93,7 +106,59 @@ def build_bundle(
     }
     scope_paths = list(edit_scope.allowed_paths) + list(edit_scope.related_paths) + list(edit_scope.protected_paths)
     bundle.staleness = collect_state(repo_path, scope_paths=scope_paths)
+    _emit_bundle_event(repo_path, bundle, context_relevant_files=context.relevant_files,
+                       context_relevant_docs=context.relevant_docs,
+                       context_related_tests=context.related_tests)
     return bundle
+
+
+def _emit_bundle_event(
+    repo_path: Path,
+    bundle: GroundTruthBundle,
+    *,
+    context_relevant_files: list[RankedPath],
+    context_relevant_docs: list[RankedPath],
+    context_related_tests: list[RankedPath],
+) -> None:
+    """Write the ``bundle_emitted`` feedback event for later attribution.
+
+    Ranked paths include the *full* ranker output (files + docs + tests),
+    each with its ``kind/subkind`` key and the per-component scores. The
+    tuner uses these to fit per-(kind, subkind) thresholds; the assembler
+    just propagates what the scanner already classified onto each
+    :class:`~repoctx.models.RankedPath`. Best-effort: any failure is
+    swallowed since feedback logging must never break the bundle path.
+    """
+    try:
+        ranked_paths: list[dict[str, Any]] = []
+        for rp in (*context_relevant_files, *context_relevant_docs, *context_related_tests):
+            ranked_paths.append(_ranked_path_event_entry(rp))
+        append_event(
+            repo_path,
+            {
+                "event_type": "bundle_emitted",
+                "bundle_id": bundle.id,
+                "task_raw": bundle.task_raw,
+                "ranked_paths": ranked_paths,
+                "ranker": bundle.metrics.get("ranker", "lexical"),
+                "source": "internal",
+                "repo_root": str(repo_path),
+            },
+        )
+    except Exception:  # noqa: BLE001 — feedback logging must never break retrieval
+        import logging
+        logging.getLogger(__name__).debug("Failed to emit bundle_emitted event", exc_info=True)
+
+
+def _ranked_path_event_entry(rp: RankedPath) -> dict[str, Any]:
+    from repoctx.subkinds import full_kind
+    return {
+        "path": rp.path,
+        "kind": full_kind(rp.kind or "code", rp.subkind),
+        "score": float(rp.score),
+        "heuristic_score": float(rp.heuristic_score),
+        "embedding_score": float(rp.embedding_score),
+    }
 
 
 # ---- internals --------------------------------------------------------------------

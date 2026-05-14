@@ -7,13 +7,16 @@ Each module exposes:
 """
 
 from repoctx.commands import (
+    eval as eval_module,
     experiment,
     hook,
     index,
     install,
     protocol_ops,
     query,
+    reap,
     stats,
+    tune as tune_module,
 )
 
 # Order controls --help display order.
@@ -39,6 +42,9 @@ COMMAND_MODULES = [
     install.propose_authority_cmd,
     stats,
     hook.hook_cmd,
+    reap.reap_cmd,
+    eval_module.eval_cmd,
+    tune_module.tune_cmd,
 ]
 
 COMMAND_HANDLERS = {mod.NAME: mod.run for mod in COMMAND_MODULES}

@@ -36,7 +36,9 @@ def repo(tmp_path: Path) -> Path:
 
 def test_op_bundle_returns_full_schema(repo: Path) -> None:
     out = op_bundle("tokens", repo_root=repo)
-    assert out["schema_version"] == "repoctx-bundle/1"
+    assert out["schema_version"] == "repoctx-bundle/2"
+    # v2 added a stable bundle id for feedback-loop attribution.
+    assert isinstance(out["id"], str) and len(out["id"]) == 16
     assert "authority" in out and "edit_scope" in out
     assert out["when_to_recall_repoctx"]
 

@@ -587,6 +587,32 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
         semantic_search,
     )
 
+    def mark_used(
+        bundle_id: str,
+        labels: list[dict[str, object]],
+        repo_root: str | None = None,
+    ) -> dict[str, object]:
+        from repoctx.ops import op_mark_used
+
+        root = _resolve(repo_root)
+        return _run_op(
+            "mark_used",
+            bundle_id,
+            root,
+            lambda: op_mark_used(bundle_id, labels, repo_root=root),
+        )
+    _register(
+        "Record graded relevance labels for files in a bundle you used. "
+        "`labels` is a list of {path, relevance} where relevance is one of "
+        "`informed_edit` (you edited this file), `informed_context` (you "
+        "read it and it shaped an edit elsewhere — the highest-value signal "
+        "no other source can capture), or `noise` (it ended up in the "
+        "bundle but didn't earn its slot). Call this at task end so the "
+        "Phase 3 tuner can fit per-kind retrieval thresholds. `bundle_id` "
+        "is on the bundle response.",
+        mark_used,
+    )
+
     return server
 
 

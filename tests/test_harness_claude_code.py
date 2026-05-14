@@ -71,8 +71,10 @@ def test_installer_writes_post_tool_hook(tmp_path: Path) -> None:
     assert result.settings_path is not None
     settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
     matchers = settings["hooks"]["PostToolUse"]
+    # Commands are now pinned to the absolute Python interpreter path; the
+    # legible "repoctx update" marker appears mid-string after ``-m``.
     assert any(
-        any(h.get("command", "").startswith("repoctx update") for h in (m.get("hooks") or []))
+        any("repoctx update" in h.get("command", "") for h in (m.get("hooks") or []))
         for m in matchers
     )
 
@@ -87,7 +89,7 @@ def test_installer_hook_is_idempotent(tmp_path: Path) -> None:
         h
         for m in matchers
         for h in (m.get("hooks") or [])
-        if h.get("command", "").startswith("repoctx update")
+        if "repoctx update" in h.get("command", "")
     ]
     assert len(repoctx_hooks) == 1
 
@@ -107,7 +109,7 @@ def test_installer_preserves_existing_settings(tmp_path: Path) -> None:
         for h in (m.get("hooks") or [])
     ]
     assert "echo" in commands
-    assert any(c and c.startswith("repoctx update") for c in commands)
+    assert any(c and "repoctx update" in c for c in commands)
 
 
 def test_installer_agents_section_includes_upkeep(tmp_path: Path) -> None:
@@ -457,10 +459,10 @@ def test_installer_writes_prompt_submit_and_stop_hooks(tmp_path: Path) -> None:
     settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
 
     prompt_cmds = _hook_commands(settings, "UserPromptSubmit")
-    assert any(c.startswith("repoctx hook prompt-nudge") for c in prompt_cmds)
+    assert any("repoctx hook prompt-nudge" in c for c in prompt_cmds)
 
     stop_cmds = _hook_commands(settings, "Stop")
-    assert any(c.startswith("repoctx hook stop-check") for c in stop_cmds)
+    assert any("repoctx hook stop-check" in c for c in stop_cmds)
 
 
 def test_new_hooks_are_idempotent(tmp_path: Path) -> None:
@@ -469,12 +471,12 @@ def test_new_hooks_are_idempotent(tmp_path: Path) -> None:
     assert not second.settings_changed
     settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
 
-    for event, prefix in [
+    for event, marker in [
         ("PostToolUse", "repoctx update"),
         ("UserPromptSubmit", "repoctx hook prompt-nudge"),
         ("Stop", "repoctx hook stop-check"),
     ]:
-        matching = [c for c in _hook_commands(settings, event) if c.startswith(prefix)]
+        matching = [c for c in _hook_commands(settings, event) if marker in c]
         assert len(matching) == 1, (event, matching)
 
 
@@ -500,8 +502,8 @@ def test_new_hooks_preserve_user_authored_entries(tmp_path: Path) -> None:
 
     prompt_cmds = _hook_commands(settings, "UserPromptSubmit")
     assert "echo prompt" in prompt_cmds
-    assert any(c.startswith("repoctx hook prompt-nudge") for c in prompt_cmds)
+    assert any("repoctx hook prompt-nudge" in c for c in prompt_cmds)
 
     stop_cmds = _hook_commands(settings, "Stop")
     assert "echo stop" in stop_cmds
-    assert any(c.startswith("repoctx hook stop-check") for c in stop_cmds)
+    assert any("repoctx hook stop-check" in c for c in stop_cmds)

@@ -1,4 +1,6 @@
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from types import MappingProxyType
 
 
 DOC_PRIORITY = {
@@ -82,6 +84,27 @@ STOPWORDS = {
 }
 
 
+# Kinds carried by FileRecord.kind ("code" / "doc" / "config" / "test") plus a
+# "_default" fallback used when a record's kind isn't represented in the map.
+# Keeping these as MappingProxyType makes the dataclass-default safe to share
+# across instances without risking mutation.
+_DEFAULT_QUALIFY_THRESHOLDS: Mapping[str, float] = MappingProxyType({
+    "code": 0.3,
+    "doc": 0.3,
+    "config": 0.3,
+    "test": 0.3,
+    "_default": 0.3,
+})
+
+_DEFAULT_LEXICAL_TIEBREAKS: Mapping[str, float] = MappingProxyType({
+    "code": 0.05,
+    "doc": 0.05,
+    "config": 0.05,
+    "test": 0.05,
+    "_default": 0.05,
+})
+
+
 @dataclass(frozen=True, slots=True)
 class RepoCtxConfig:
     ignored_dirs: tuple[str, ...] = IGNORED_DIRS
@@ -94,12 +117,50 @@ class RepoCtxConfig:
     max_files: int = 8
     max_tests: int = 6
     max_neighbors: int = 8
-    embedding_weight: float = 12.0
-    embedding_qualify_threshold: float = 0.3
-    # When embedding_scores are present, embeddings are the primary ranker
-    # (cosine 0–1) and the lexical heuristic becomes a small tiebreaker. This
-    # weight scales the normalized lexical score before adding it to cosine.
-    lexical_tiebreak_weight: float = 0.05
+    # Per-kind cosine floor for an embedding hit to qualify as a semantic
+    # match. The retriever looks up by FileRecord.kind; missing kinds fall
+    # back to "_default".
+    embedding_qualify_thresholds: Mapping[str, float] = field(
+        default_factory=lambda: dict(_DEFAULT_QUALIFY_THRESHOLDS)
+    )
+    # Per-kind weight scaling the normalized lexical heuristic when it's
+    # acting as a tiebreaker on top of cosine similarity.
+    lexical_tiebreak_weights: Mapping[str, float] = field(
+        default_factory=lambda: dict(_DEFAULT_LEXICAL_TIEBREAKS)
+    )
+
+    # Per-bundle probability of including 1-2 sub-threshold candidates so
+    # the Phase 3 tuner can see what the current threshold is filtering out.
+    # Without this, the loop tunes itself toward whatever it already admits
+    # and is structurally blind to "lower the threshold" signals.
+    exploration_epsilon: float = 0.05
+
+    def qualify_threshold_for(self, kind: str, subkind: str = "") -> float:
+        """Resolve the threshold by walking the hierarchical fallback chain.
+
+        Order: ``kind/subkind`` (e.g. ``code/handler``) → parent ``kind``
+        (e.g. ``code``) → ``_default``. The first key present in the map
+        wins, so per-subkind tuning is "free" once a cell collects labels
+        and silently inactive otherwise.
+        """
+        m = self.embedding_qualify_thresholds
+        if subkind:
+            full = f"{kind}/{subkind}"
+            if full in m:
+                return m[full]
+        if kind in m:
+            return m[kind]
+        return m.get("_default", 0.3)
+
+    def lexical_tiebreak_for(self, kind: str, subkind: str = "") -> float:
+        m = self.lexical_tiebreak_weights
+        if subkind:
+            full = f"{kind}/{subkind}"
+            if full in m:
+                return m[full]
+        if kind in m:
+            return m[kind]
+        return m.get("_default", 0.05)
 
 
 DEFAULT_CONFIG = RepoCtxConfig()

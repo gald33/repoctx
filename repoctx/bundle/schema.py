@@ -11,7 +11,7 @@ from typing import Any, Literal
 from repoctx.authority.constraints import Constraint
 from repoctx.authority.records import AuthorityRecord
 
-BUNDLE_SCHEMA_VERSION = "repoctx-bundle/1"
+BUNDLE_SCHEMA_VERSION = "repoctx-bundle/2"
 
 
 @dataclass(slots=True)
@@ -83,6 +83,10 @@ class RankedCodeRef:
 class GroundTruthBundle:
     task_summary: str
     task_raw: str
+    # Stable per-bundle id used to join feedback events back to the bundle
+    # that surfaced each path. Populated by ``build_bundle``; empty string
+    # for bundles built before bundle ids were added.
+    id: str = ""
     authoritative_records: list[AuthorityRecord] = field(default_factory=list)
     constraints: list[Constraint] = field(default_factory=list)
     relevant_code: list[RankedCodeRef] = field(default_factory=list)
@@ -112,6 +116,7 @@ class GroundTruthBundle:
 
         return {
             "schema_version": BUNDLE_SCHEMA_VERSION,
+            "id": self.id,
             "task": {"summary": self.task_summary, "raw": self.task_raw},
             "authority": {
                 "records": [_auth_to_dict(r) for r in self.authoritative_records],

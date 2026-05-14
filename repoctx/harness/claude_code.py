@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -67,6 +69,10 @@ If `contracts/` and `docs/architecture/` only contain the scaffold (`README.md` 
 MCP_SERVER_NAME = "repoctx"
 
 HOOK_MATCHER = "Edit|Write|MultiEdit"
+# Suffix form: what the user sees in settings.json after ``<python> -m ``. We
+# keep these as the legible "what this hook does" strings; the install code
+# prepends ``sys.executable -m`` at write time so the hook fires regardless
+# of whether the user's shell PATH includes the venv's ``repoctx`` binary.
 HOOK_COMMAND = "repoctx update --from-claude-hook"
 
 # Task-entry / task-exit nudge hooks. Wired in alongside the PostToolUse
@@ -75,6 +81,33 @@ HOOK_COMMAND = "repoctx update --from-claude-hook"
 # `mcp__repoctx__validate_plan` before stopping.
 PROMPT_NUDGE_COMMAND = "repoctx hook prompt-nudge"
 STOP_CHECK_COMMAND = "repoctx hook stop-check"
+
+# Feedback-loop tool-use hook. Separate from the embedding-update hook because
+# the matcher includes Read (you don't want to re-embed on every read) and the
+# command is silent (no agent-facing output). Writes to the per-repo
+# feedback-events.jsonl which the Phase 3 tuner consumes.
+TOOL_USE_HOOK_MATCHER = "Read|Edit|Write|MultiEdit"
+TOOL_USE_HOOK_COMMAND = "repoctx hook tool-use"
+
+
+def _resolve_repoctx_invocation(suffix: str) -> str:
+    """Build a shell command that runs ``repoctx <suffix>`` via the interpreter
+    that ran ``repoctx install``.
+
+    Why: hooks and the MCP server are launched by Claude Code (or another
+    host) via the user's shell, whose PATH may not include the venv where
+    ``repoctx`` was installed. Pinning to ``sys.executable`` makes the
+    install self-contained regardless of how the user installed (venv,
+    pipx, uv tool, system pip).
+
+    ``suffix`` must start with ``repoctx ``; we strip the leading word and
+    invoke ``-m repoctx`` so the same constants stay legible to anyone
+    reading ``.claude/settings.json``.
+    """
+    if not suffix.startswith("repoctx "):
+        raise ValueError(f"repoctx invocation must start with 'repoctx ': {suffix!r}")
+    args = suffix[len("repoctx "):]
+    return f"{shlex.quote(sys.executable)} -m repoctx {args}"
 
 CLAUDE_MD_FILENAME = "CLAUDE.md"
 AGENTS_MD_FILENAME = "AGENTS.md"
@@ -443,12 +476,18 @@ def _ensure_mcp_registration(root: Path) -> tuple[Path, bool]:
     else:
         config = {}
     servers = config.setdefault("mcpServers", {})
-    if MCP_SERVER_NAME in servers:
-        return path, False
-    servers[MCP_SERVER_NAME] = {
-        "command": "python",
+    # Pin to the interpreter that ran ``repoctx install`` — the host launches
+    # the MCP server via the shell, whose PATH may not include the venv.
+    desired = {
+        "command": sys.executable,
         "args": ["-m", "repoctx.mcp_server", "--repo", str(root)],
     }
+    existing = servers.get(MCP_SERVER_NAME)
+    if existing == desired:
+        return path, False
+    # Upgrade in place: older installs wrote ``"command": "python"`` which
+    # silently fails when the host's shell PATH doesn't include the venv.
+    servers[MCP_SERVER_NAME] = desired
     path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     return path, True
 
@@ -493,23 +532,30 @@ def _ensure_post_tool_hook(root: Path) -> tuple[Path, bool]:
     changed |= _ensure_hook_entry(
         hooks,
         event="PostToolUse",
-        command=HOOK_COMMAND,
+        command=_resolve_repoctx_invocation(HOOK_COMMAND),
         matcher=HOOK_MATCHER,
-        command_prefix="repoctx update",
+        command_marker="repoctx update",
+    )
+    changed |= _ensure_hook_entry(
+        hooks,
+        event="PostToolUse",
+        command=_resolve_repoctx_invocation(TOOL_USE_HOOK_COMMAND),
+        matcher=TOOL_USE_HOOK_MATCHER,
+        command_marker=TOOL_USE_HOOK_COMMAND,
     )
     changed |= _ensure_hook_entry(
         hooks,
         event="UserPromptSubmit",
-        command=PROMPT_NUDGE_COMMAND,
+        command=_resolve_repoctx_invocation(PROMPT_NUDGE_COMMAND),
         matcher=None,
-        command_prefix=PROMPT_NUDGE_COMMAND,
+        command_marker=PROMPT_NUDGE_COMMAND,
     )
     changed |= _ensure_hook_entry(
         hooks,
         event="Stop",
-        command=STOP_CHECK_COMMAND,
+        command=_resolve_repoctx_invocation(STOP_CHECK_COMMAND),
         matcher=None,
-        command_prefix=STOP_CHECK_COMMAND,
+        command_marker=STOP_CHECK_COMMAND,
     )
 
     if changed:
@@ -523,14 +569,22 @@ def _ensure_hook_entry(
     event: str,
     command: str,
     matcher: str | None,
-    command_prefix: str,
+    command_marker: str,
 ) -> bool:
-    """Append a hook entry under ``hooks[event]`` unless one already exists.
+    """Append (or upgrade) a hook entry under ``hooks[event]``.
 
-    "Already exists" = some entry under that event carries a command that
-    starts with ``command_prefix``. When ``matcher`` is given, the search
-    is narrowed to entries with that matcher; when ``None``, any entry
-    under the event counts. Returns True iff the list was mutated.
+    Detection: any entry whose ``command`` contains ``command_marker`` is
+    treated as our hook. If the stored command already equals what we'd
+    write, the entry is left alone (idempotent re-install). If it differs
+    — e.g., an older install wrote bare ``repoctx ...`` and the current
+    binary writes ``<absolute python> -m repoctx ...`` — it's *rewritten*
+    in place so existing installs auto-upgrade. Returns True iff anything
+    was added or changed.
+
+    When ``matcher`` is given, the search is narrowed to entries with that
+    matcher; when ``None``, any entry under the event counts. Substring
+    match (not prefix) because absolute interpreter paths now precede the
+    legible marker.
     """
     entries = hooks.setdefault(event, [])
     if not isinstance(entries, list):
@@ -546,8 +600,11 @@ def _ensure_hook_entry(
             if not isinstance(h, dict):
                 continue
             cmd = h.get("command")
-            if isinstance(cmd, str) and cmd.startswith(command_prefix):
-                return False
+            if isinstance(cmd, str) and command_marker in cmd:
+                if cmd == command:
+                    return False  # already up-to-date
+                h["command"] = command  # upgrade stale entry in place
+                return True
 
     new_entry: dict[str, object] = {
         "hooks": [{"type": "command", "command": command}],

@@ -17,9 +17,12 @@ TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
 def get_task_context(
     task: str,
     repo_root: str | Path = ".",
-    config: RepoCtxConfig = DEFAULT_CONFIG,
+    config: RepoCtxConfig | None = None,
     embedding_scores: dict[str, float] | None = None,
 ) -> ContextResponse:
+    if config is None:
+        from repoctx.config_loader import load_repo_config
+        config = load_repo_config(repo_root)
     scan_started = perf_counter()
     index = scan_repository(repo_root, config=config)
     scan_duration_ms = int((perf_counter() - scan_started) * 1000)
@@ -88,14 +91,17 @@ def rank_documents(
         heuristic_score = record.doc_score + (4.0 * len(path_overlap)) + (1.0 * len(content_overlap))
 
         emb_score = (embedding_scores or {}).get(record.path, 0.0)
+        qualify_threshold = config.qualify_threshold_for(record.kind, record.subkind)
         score = _blend_score(
             heuristic_score=heuristic_score,
             emb_score=emb_score,
             embeddings_active=embedding_scores is not None,
             config=config,
+            kind=record.kind,
+            subkind=record.subkind,
         )
 
-        has_emb_signal = embedding_scores is not None and emb_score >= config.embedding_qualify_threshold
+        has_emb_signal = embedding_scores is not None and emb_score >= qualify_threshold
         if not has_emb_signal:
             if not overlap and record.doc_score < 12.0:
                 continue
@@ -107,7 +113,7 @@ def rank_documents(
             overlap=overlap,
             default_reason="High-value documentation for repository context",
             emb_score=emb_score if embedding_scores is not None else None,
-            qualify_threshold=config.embedding_qualify_threshold,
+            qualify_threshold=qualify_threshold,
         )
         ranked.append(
             RankedPath(
@@ -117,6 +123,8 @@ def rank_documents(
                 snippet=_select_snippet(record, overlap),
                 heuristic_score=heuristic_score,
                 embedding_score=emb_score,
+                kind=record.kind,
+                subkind=record.subkind,
             )
         )
 
@@ -132,6 +140,7 @@ def rank_files(
 ) -> list[RankedPath]:
     task_tokens = set(tokenize(task))
     ranked: list[RankedPath] = []
+    sub_threshold: list[RankedPath] = []
     candidates = index.code_files + index.config_files
 
     for record in candidates:
@@ -147,15 +156,40 @@ def rank_files(
             heuristic_score *= 0.5
 
         emb_score = (embedding_scores or {}).get(record.path, 0.0)
+        qualify_threshold = config.qualify_threshold_for(record.kind, record.subkind)
         score = _blend_score(
             heuristic_score=heuristic_score,
             emb_score=emb_score,
             embeddings_active=embedding_scores is not None,
             config=config,
+            kind=record.kind,
+            subkind=record.subkind,
         )
 
-        has_emb_signal = embedding_scores is not None and emb_score >= config.embedding_qualify_threshold
+        has_emb_signal = embedding_scores is not None and emb_score >= qualify_threshold
         if not has_emb_signal:
+            # Capture near-miss embedding candidates for the exploration
+            # budget: paths whose cosine is positive but below the kind's
+            # threshold. Without this list the loop never sees what the
+            # threshold filters out.
+            if (
+                embedding_scores is not None
+                and emb_score > 0
+                and not (name_overlap or path_overlap)
+                and len(content_overlap) < 2
+            ):
+                sub_threshold.append(
+                    RankedPath(
+                        path=record.path,
+                        reason=f"Exploration probe (cosine {emb_score:.2f} below threshold {qualify_threshold:.2f})",
+                        score=emb_score,  # raw cosine — lower than blended scores
+                        snippet=_select_snippet(record, []),
+                        heuristic_score=heuristic_score,
+                        embedding_score=emb_score,
+                        kind=record.kind,
+                        subkind=record.subkind,
+                    )
+                )
             if not (name_overlap or path_overlap) and len(content_overlap) < 2:
                 continue
         if score <= 0:
@@ -165,7 +199,7 @@ def rank_files(
             overlap=overlap,
             default_reason="Task tokens align with file name and content",
             emb_score=emb_score if embedding_scores is not None else None,
-            qualify_threshold=config.embedding_qualify_threshold,
+            qualify_threshold=qualify_threshold,
         )
         ranked.append(
             RankedPath(
@@ -175,11 +209,40 @@ def rank_files(
                 snippet=_select_snippet(record, overlap),
                 heuristic_score=heuristic_score,
                 embedding_score=emb_score,
+                kind=record.kind,
+                subkind=record.subkind,
             )
         )
 
     ranked.sort(key=lambda item: (-item.score, item.path))
-    return ranked[: config.max_files]
+    top = ranked[: config.max_files]
+    return _maybe_explore(top, sub_threshold, epsilon=config.exploration_epsilon)
+
+
+def _maybe_explore(
+    top: list[RankedPath],
+    sub_threshold: list[RankedPath],
+    *,
+    epsilon: float,
+) -> list[RankedPath]:
+    """With probability ``epsilon``, append 1-2 sub-threshold candidates.
+
+    These show up in the bundle and therefore in the bundle_emitted event's
+    ranked_paths, so the Phase 3 tuner can observe whether they earn a
+    positive label — that's the only way to learn "the threshold is too
+    tight". Sampling is random per call so a long run will probe many
+    different sub-threshold paths.
+    """
+    if not sub_threshold or epsilon <= 0:
+        return top
+    import random
+    if random.random() >= epsilon:
+        return top
+    # Bias toward higher-cosine sub-threshold candidates — they're the
+    # closest to qualifying, so their labels are the most informative.
+    sub_threshold.sort(key=lambda p: -p.embedding_score)
+    probes = sub_threshold[: min(2, len(sub_threshold))]
+    return top + probes
 
 
 def find_related_tests(
@@ -215,6 +278,8 @@ def find_related_tests(
                 path=record.path,
                 reason="; ".join(dict.fromkeys(reasons)) or "Likely associated test",
                 score=score,
+                kind=record.kind,
+                subkind=record.subkind,
             )
         )
 
@@ -243,12 +308,17 @@ def _blend_score(
     emb_score: float,
     embeddings_active: bool,
     config: RepoCtxConfig,
+    *,
+    kind: str,
+    subkind: str = "",
 ) -> float:
     """Combine lexical and embedding signals.
 
     When the embedding index is loaded, cosine similarity (0–1) is the primary
     signal and the lexical heuristic is squashed into a small tiebreaker. When
-    no embeddings are available, fall back to the v1 pure-lexical score.
+    no embeddings are available, fall back to the v1 pure-lexical score. The
+    tiebreaker weight resolves per ``(kind, subkind)`` with the same
+    hierarchical fallback the threshold uses.
     """
     if not embeddings_active:
         return heuristic_score
@@ -257,7 +327,7 @@ def _blend_score(
     # decent cosine. tanh is monotonic and saturates around heuristic ~ 12.
     import math
     lexical_norm = math.tanh(max(0.0, heuristic_score) / 12.0)
-    return primary + config.lexical_tiebreak_weight * lexical_norm
+    return primary + config.lexical_tiebreak_for(kind, subkind) * lexical_norm
 
 
 def _build_reason(
