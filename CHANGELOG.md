@@ -6,6 +6,8 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-05-21
+
 ### Added — worktree-aware index pinned to live origin/main
 
 Fixes silent retrieval degradation when repoctx is used from a git worktree:
