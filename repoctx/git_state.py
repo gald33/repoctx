@@ -8,6 +8,7 @@ Pure stdlib (``subprocess``); silent fallback on non-git repos.
 
 from __future__ import annotations
 
+import functools
 import logging
 import subprocess
 from pathlib import Path
@@ -34,6 +35,41 @@ def _run_git(repo_root: Path, *args: str) -> str | None:
     if result.returncode != 0:
         return None
     return result.stdout
+
+
+@functools.lru_cache(maxsize=256)
+def _git_common_dir_cached(repo_root_str: str) -> str | None:
+    """Cached worker for :func:`git_common_dir` (keyed by resolved path str).
+
+    The common dir of a checkout is stable for a process's lifetime, and the
+    read/queue paths call this on every tool invocation, so we memoize the
+    subprocess away.
+    """
+    out = _run_git(Path(repo_root_str), "rev-parse", "--git-common-dir")
+    if not out:
+        return None
+    raw = out.strip()
+    if not raw:
+        return None
+    p = Path(raw)
+    if not p.is_absolute():
+        p = Path(repo_root_str) / p
+    try:
+        return str(p.resolve())
+    except OSError:
+        return str(p)
+
+
+def git_common_dir(repo_root: Path) -> Path | None:
+    """Return the *shared* git dir for ``repo_root``, or ``None`` if not a repo.
+
+    All linked worktrees of a repository — and the main checkout — resolve to
+    the **same** common dir (``git rev-parse --git-common-dir``), so it is the
+    natural identity to key a per-repo index on: an index built from any
+    worktree is found from every other. Returns an absolute, resolved path.
+    """
+    cached = _git_common_dir_cached(str(Path(repo_root).resolve()))
+    return Path(cached) if cached is not None else None
 
 
 def head_sha(repo_root: Path) -> str | None:
@@ -94,4 +130,4 @@ def collect_state(repo_root: Path, scope_paths: list[str] | None = None) -> dict
     return state
 
 
-__all__ = ["collect_state", "dirty_files", "head_branch", "head_sha"]
+__all__ = ["collect_state", "dirty_files", "git_common_dir", "head_branch", "head_sha"]

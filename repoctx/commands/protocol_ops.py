@@ -15,6 +15,11 @@ def _register_bundle(subparsers) -> None:
     b.add_argument("task", help="Task description")
     b.add_argument("--repo", default=".", help="Repository root")
     b.add_argument("--full", action="store_true", help="Include full authority text")
+    b.add_argument(
+        "--include-advisory",
+        action="store_true",
+        help="Attach advisory-lane hits (in-flight branches) under a separate key",
+    )
     b.add_argument("--format", choices=("json", "markdown"), default="json")
 
 
@@ -27,7 +32,15 @@ def _run_bundle(args: argparse.Namespace) -> None:
         return
     from repoctx.protocol import op_bundle
 
-    print(json.dumps(op_bundle(args.task, repo_root=args.repo, include_full_text=args.full), indent=2))
+    print(json.dumps(
+        op_bundle(
+            args.task,
+            repo_root=args.repo,
+            include_full_text=args.full,
+            include_advisory=getattr(args, "include_advisory", False),
+        ),
+        indent=2,
+    ))
 
 
 bundle_cmd = SimpleNamespace(NAME="bundle", register=_register_bundle, run=_run_bundle)
@@ -209,3 +222,49 @@ def _run_semantic_search(args: argparse.Namespace) -> None:
 
 
 semantic_search_cmd = SimpleNamespace(NAME="semantic-search", register=_register_semantic_search, run=_run_semantic_search)
+
+
+# -- advisory-index / advisory-search (opt-in in-flight-branch lane) -----------
+
+def _register_advisory_index(subparsers) -> None:
+    ai = subparsers.add_parser(
+        "advisory-index",
+        help="Build the opt-in advisory index over branches ahead of origin/main",
+    )
+    ai.add_argument("--repo", default=".", help="Repository root")
+    ai.add_argument("--verbose", action="store_true")
+
+
+def _run_advisory_index(args: argparse.Namespace) -> None:
+    try:
+        from repoctx.advisory import build_advisory_index
+    except ImportError:
+        print("Embedding dependencies not installed. Run: pip install 'repoctx-mcp[embeddings]'")
+        return
+    print(json.dumps(build_advisory_index(args.repo), indent=2))
+
+
+advisory_index_cmd = SimpleNamespace(
+    NAME="advisory-index", register=_register_advisory_index, run=_run_advisory_index,
+)
+
+
+def _register_advisory_search(subparsers) -> None:
+    as_ = subparsers.add_parser(
+        "advisory-search",
+        help="Search the advisory lane (in-flight branches; NOT authoritative)",
+    )
+    as_.add_argument("query", help="Query string")
+    as_.add_argument("--repo", default=".", help="Repository root")
+    as_.add_argument("--top", type=int, default=10, help="Max hits (default 10)")
+
+
+def _run_advisory_search(args: argparse.Namespace) -> None:
+    from repoctx.advisory import op_advisory_search
+
+    print(json.dumps(op_advisory_search(args.query, repo_root=args.repo, top_k=args.top), indent=2))
+
+
+advisory_search_cmd = SimpleNamespace(
+    NAME="advisory-search", register=_register_advisory_search, run=_run_advisory_search,
+)

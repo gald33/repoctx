@@ -34,6 +34,8 @@ COMMAND_MODULES = [
     protocol_ops.refresh_cmd,
     protocol_ops.detect_changes_cmd,
     protocol_ops.semantic_search_cmd,
+    protocol_ops.advisory_index_cmd,
+    protocol_ops.advisory_search_cmd,
     install.install_all_cmd,
     install.install_claude_code_cmd,
     install.install_cursor_cmd,

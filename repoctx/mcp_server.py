@@ -51,8 +51,31 @@ def _recent_repos_path() -> Path:
 _RECENT_REPOS_LIMIT = 10
 
 
+def _identity_key(repo_root: Path) -> str:
+    """Stable per-repo identity used to collapse worktrees to one entry.
+
+    All worktrees of a repo share one git common dir, so keying on it means a
+    repo appears once in the recency log regardless of which worktree (or the
+    main checkout) invoked repoctx. Falls back to the resolved path when not a
+    git repo.
+    """
+    try:
+        from repoctx.git_state import git_common_dir
+
+        common = git_common_dir(repo_root)
+        if common is not None:
+            return str(common)
+    except Exception:  # noqa: BLE001 — identity is best-effort
+        pass
+    return str(Path(repo_root).resolve())
+
+
 def _read_recent_repos() -> list[Path]:
-    """Return recent repos in most-recent-first order, filtered to live ones."""
+    """Return recent repos in most-recent-first order, filtered to live ones.
+
+    Deduped by repo *identity* (git common dir), so multiple worktrees of the
+    same repo collapse to a single suggestion.
+    """
     try:
         raw = _recent_repos_path().read_text(encoding="utf-8")
     except OSError:
@@ -64,6 +87,7 @@ def _read_recent_repos() -> list[Path]:
     if not isinstance(data, list):
         return []
     out: list[Path] = []
+    seen: set[str] = set()
     for entry in data:
         if isinstance(entry, dict):
             path_str = entry.get("path")
@@ -80,6 +104,10 @@ def _read_recent_repos() -> list[Path]:
         # messages is just noise.
         if not (candidate / ".git").exists():
             continue
+        key = _identity_key(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
         out.append(candidate)
     return out
 
@@ -93,7 +121,10 @@ def _record_recent_repo(repo_root: Path) -> None:
         path = _recent_repos_path()
         existing = _read_recent_repos()
         # Move-to-front semantics — most recently resolved wins the top slot.
-        deduped = [p for p in existing if p != repo_root]
+        # Dedupe by identity so a different worktree of the same repo replaces
+        # (rather than duplicates) the prior entry.
+        new_key = _identity_key(repo_root)
+        deduped = [p for p in existing if _identity_key(p) != new_key]
         merged = [repo_root, *deduped][:_RECENT_REPOS_LIMIT]
         from time import time as _now
 
@@ -407,10 +438,23 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
         fn.__doc__ = f"{summary}\n\n{_REPO_ROOT_DOC}"
         return server.tool()(fn)
 
-    def bundle(task: str, repo_root: str | None = None) -> dict[str, object]:
+    def bundle(
+        task: str, repo_root: str | None = None, include_advisory: bool = False
+    ) -> dict[str, object]:
         root = _resolve(repo_root)
-        return _run_op("bundle", task, root, lambda: op_bundle(task, repo_root=root))
-    _register("Build the v2 ground-truth bundle for a task.", bundle)
+        return _run_op(
+            "bundle", task, root,
+            lambda: op_bundle(task, repo_root=root, include_advisory=include_advisory),
+        )
+    _register(
+        "Build the v2 ground-truth bundle for a task. The result carries "
+        "top-level `warnings` and a `retrieval` block: if `retrieval.ranker` is "
+        "`lexical`/`index_status` isn't `ok`, embedding retrieval is degraded "
+        "(see `warnings` for the fix) — do not trust ranking as semantic. Set "
+        "`include_advisory=true` to also attach in-flight-branch hits under a "
+        "separate `advisory` key (never mixed into `relevant_code`/`authority`).",
+        bundle,
+    )
 
     def authority(
         task: str, include: str = "summary", repo_root: str | None = None
@@ -564,7 +608,7 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
         top_k: int = 10,
         kind: str | None = None,
         repo_root: str | None = None,
-    ) -> list[dict[str, object]]:
+    ) -> dict[str, object]:
         from repoctx.ops import op_semantic_search
 
         root = _resolve(repo_root)
@@ -578,13 +622,41 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
         )
     _register(
         "Top-K most similar chunks for a query against the embedding index. "
-        "Returns raw per-chunk hits (path, score, snippet, line range, "
-        "enclosing_symbol) sorted by descending cosine similarity. "
-        "`kind` optionally filters to one of code/doc/test/config. Returns "
-        "an empty list if the index hasn't been built (`repoctx index`). "
-        "Use this for direct similarity lookups; for task-shaped retrieval "
-        "prefer `bundle` or `get_task_context`.",
+        "Returns an envelope {status, message, repo, index_location, results}: "
+        "`results` is the per-chunk hits (path, score, snippet, line range, "
+        "enclosing_symbol) sorted by descending cosine similarity; `status` is "
+        "`ok` when embedding search ran, else `no_index`/`deps_missing`/"
+        "`schema_mismatch`/`error` with a `message` saying how to fix it (e.g. "
+        "run `repoctx index`). A status other than `ok` means retrieval is "
+        "DARK — do not treat an empty `results` as 'no matches'. `kind` "
+        "optionally filters to code/doc/test/config. For task-shaped retrieval "
+        "prefer `bundle`.",
         semantic_search,
+    )
+
+    def advisory_search(
+        query: str,
+        top_k: int = 10,
+        repo_root: str | None = None,
+    ) -> dict[str, object]:
+        from repoctx.advisory import op_advisory_search
+
+        root = _resolve(repo_root)
+        return _run_op(
+            "advisory_search",
+            query,
+            root,
+            lambda: op_advisory_search(query, repo_root=root, top_k=top_k),
+        )
+    _register(
+        "Search the ADVISORY lane: committed work on branches ahead of "
+        "origin/main (in-flight, not landed). Use to check whether something "
+        "is already being built elsewhere or where the architecture is heading. "
+        "Returns hits tagged with provenance (branch, commits_ahead, "
+        "last_commit_date, merge_status). These are STRICTLY LOWER AUTHORITY "
+        "than `bundle`/`semantic_search` — never treat them as ground truth. "
+        "Opt-in: returns status `no_index` until you run `repoctx advisory-index`.",
+        advisory_search,
     )
 
     def mark_used(

@@ -6,6 +6,49 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added — worktree-aware index pinned to live origin/main
+
+Fixes silent retrieval degradation when repoctx is used from a git worktree:
+the index lived in the working tree, so a worktree never found the index built
+in the main checkout and quietly fell back to lexical ranking.
+
+- **Index keyed by repo identity, shared across worktrees.** Stored at
+  `<git-common-dir>/repoctx/embeddings` (resolved via
+  `git rev-parse --git-common-dir`) instead of `<cwd>/.repoctx/embeddings`, so
+  every worktree and the main checkout share one index. Lives under `.git/`, so
+  it's never tracked or seen as dirty. `recent_repos.json` is deduped by
+  identity so worktrees collapse to one entry. New `repoctx/index_location.py`,
+  `git_state.git_common_dir()`.
+
+- **Fail loud instead of silent lexical fallback.** `semantic_search` now
+  returns an envelope `{status, message, results}` (`no_index` ≠ "no matches");
+  `bundle` carries top-level `warnings[]` and a `retrieval` block
+  (`ranker`/`index_status`/`index_location`). New
+  `embeddings.load_retriever_status()` / `probe_index_status()`.
+
+- **Authoritative index pinned to `origin/main`, read from git objects.** New
+  `repoctx/git_tree.py` reads the tree via `ls-tree`/`cat-file` (no checkout),
+  so landed work is retrievable even from a branch that predates it. `git fetch`
+  is TTL-gated; `repoctx index` defaults to `--source origin-main` (`--source
+  worktree` opts out); `repoctx index --refresh` re-embeds the delta. Read-path
+  auto-refresh is TTL-gated and capped (`REPOCTX_BASE_REFRESH_ON_READ=0` for
+  warn-only).
+
+- **Worktree delta overlaid at query time.** Commits ahead of origin/main plus
+  uncommitted edits are embedded on the fly and layered over the base, so
+  in-progress work is retrievable as if rebased. New `repoctx/overlay.py`
+  (`REPOCTX_OVERLAY_WORKTREE=0` to disable).
+
+- **Opt-in advisory lane** (`repoctx/advisory.py`) over committed branches ahead
+  of origin/main, for "is this already being built elsewhere?". Separate index,
+  separate response key, provenance-tagged (branch / commits-ahead /
+  last-commit-date / merge-status), never mixed into authoritative results. New
+  `advisory_search` MCP tool, `advisory-index` / `advisory-search` CLI, and a
+  `bundle(include_advisory=True)` flag.
+
+- **Automatic migration** of pre-existing in-tree `.repoctx/embeddings` to the
+  shared location on the next read or `repoctx index`.
+
 ## [1.4.0] — 2026-05-14
 
 ### Added — per-repo retrieval tuning loop (feedback events + MAP-fit model)
