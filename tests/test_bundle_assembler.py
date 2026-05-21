@@ -70,6 +70,29 @@ def test_bundle_metrics_report_ranker_mode(repo: Path) -> None:
     assert bundle_emb.metrics["ranker"] == "embeddings"
 
 
+def test_bundle_warns_loudly_when_no_embedding_index(repo: Path) -> None:
+    """Lexical fallback must be surfaced at the top level, not buried in metrics."""
+    bundle = build_bundle("tokens", repo_root=repo)
+    data = bundle.to_dict()
+    # Top-level, caller-visible warning + retrieval provenance.
+    assert data["warnings"], "degraded retrieval must produce a top-level warning"
+    assert any("repoctx index" in w for w in data["warnings"])
+    assert data["retrieval"]["ranker"] == "lexical"
+    assert data["retrieval"]["embeddings_active"] is False
+    assert data["retrieval"]["index_status"] == "no_index"
+
+
+def test_bundle_no_warning_when_embeddings_active(repo: Path) -> None:
+    bundle = build_bundle(
+        "tokens", repo_root=repo, embedding_scores={"app/tokens.py": 0.9}
+    )
+    data = bundle.to_dict()
+    assert data["warnings"] == []
+    assert data["retrieval"]["ranker"] == "embeddings"
+    assert data["retrieval"]["embeddings_active"] is True
+    assert data["retrieval"]["index_status"] == "ok"
+
+
 def test_serialization_bounds_excerpts(repo: Path) -> None:
     big = "x" * 5000
     (repo / "contracts" / "big.md").write_text(f"# Big\n\n{big}\n")

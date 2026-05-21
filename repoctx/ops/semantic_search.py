@@ -14,12 +14,48 @@ from pathlib import Path
 from typing import Any
 
 from repoctx.config import DEFAULT_EMBEDDING_CONFIG, EmbeddingConfig
-from repoctx.embeddings import try_load_retriever
+from repoctx.embeddings import STATUS_OK, load_retriever_status
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_SNIPPET_CHARS = 500
 ALLOWED_KINDS = ("code", "doc", "test", "config")
+
+
+def _envelope(
+    status: str,
+    message: str,
+    results: list[dict[str, Any]],
+    *,
+    repo: str,
+    index_location: str,
+    warnings: list[str] | None = None,
+    base: dict | None = None,
+) -> dict[str, Any]:
+    return {
+        "status": status,
+        "message": message,
+        "repo": repo,
+        "index_location": index_location,
+        "warnings": warnings or [],
+        "base": base or {},
+        "results": results,
+    }
+
+
+def _refresh_base(repo_root: Path) -> tuple[dict | None, list[str]]:
+    """TTL-gated origin/main refresh; returns ``(base_status, warnings)``."""
+    try:
+        from repoctx.embeddings import base_staleness_warning, maybe_refresh_base_on_read
+    except ImportError:
+        return None, []
+    try:
+        status = maybe_refresh_base_on_read(repo_root)
+    except Exception:
+        logger.debug("base refresh failed", exc_info=True)
+        return None, []
+    warning = base_staleness_warning(status)
+    return status, ([warning] if warning else [])
 
 
 def op_semantic_search(
@@ -30,33 +66,45 @@ def op_semantic_search(
     kind: str | None = None,
     config: EmbeddingConfig = DEFAULT_EMBEDDING_CONFIG,
     snippet_chars: int = DEFAULT_SNIPPET_CHARS,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """Return the top-K most similar indexed chunks for *query*.
 
-    Each result is a dict with keys ``path``, ``score``, ``snippet``,
-    ``start_line``, ``end_line``, ``enclosing_symbol``. Sorted by
-    descending cosine similarity.
+    Returns an **envelope** ``{status, message, repo, index_location,
+    results}`` — never a bare list — so "no index built" is distinguishable
+    from "no matches". ``status`` is ``"ok"`` when embedding-backed search
+    ran; otherwise it is ``"no_index"`` / ``"deps_missing"`` /
+    ``"schema_mismatch"`` / ``"error"`` and ``message`` says how to fix it.
+    ``results`` is always present (empty on the failure paths).
 
-    Returns ``[]`` (with a clear log message) if no embedding index has
-    been built — agents may not have run ``repoctx index`` yet, and the
-    op should never raise on the cold-start path.
-
-    ``kind`` filters to one of ``"code" | "doc" | "test" | "config"``;
-    other values are ignored with a warning.
+    Each result has keys ``path``, ``score``, ``snippet``, ``start_line``,
+    ``end_line``, ``enclosing_symbol``, sorted by descending cosine
+    similarity. ``kind`` filters to one of ``"code" | "doc" | "test" |
+    "config"``; other values are ignored with a warning.
     """
-    if top_k <= 0:
-        return []
-
     root = Path(repo_root).resolve()
-    retriever = try_load_retriever(root, config=config)
-    if retriever is None:
-        logger.info(
-            "semantic_search: no embedding index at %s; "
-            "run `repoctx index` to build one.",
-            root,
+    base_status, base_warnings = _refresh_base(root)
+    loaded = load_retriever_status(root, config=config)
+    if not loaded.ok:
+        # Fail loud: an empty list here is indistinguishable from "no
+        # matches", which is exactly how the headline feature went dark.
+        logger.info("semantic_search unavailable for %s: %s", root, loaded.message)
+        return _envelope(
+            loaded.status, loaded.message, [], repo=str(root),
+            index_location=loaded.index_dir, warnings=base_warnings, base=base_status,
         )
-        return []
+    if top_k <= 0:
+        return _envelope(
+            STATUS_OK, "", [], repo=str(root), index_location=loaded.index_dir,
+            warnings=base_warnings, base=base_status,
+        )
 
+    retriever = loaded.retriever
+    try:
+        from repoctx.overlay import overlay_retriever
+
+        retriever = overlay_retriever(root, retriever, config=config)
+    except Exception:
+        logger.debug("overlay wrap failed; using base retriever", exc_info=True)
     if kind is not None and kind not in ALLOWED_KINDS:
         logger.warning(
             "semantic_search: ignoring unknown kind=%r (allowed: %s)",
@@ -90,7 +138,10 @@ def op_semantic_search(
         )
         if len(hits) >= top_k:
             break
-    return hits
+    return _envelope(
+        STATUS_OK, "", hits, repo=str(root), index_location=loaded.index_dir,
+        warnings=base_warnings, base=base_status,
+    )
 
 
 def _load_snippet(

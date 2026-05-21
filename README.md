@@ -180,8 +180,11 @@ The full protocol — call these from any MCP client. Target usage is **≤ 5 ca
 | `risk_report(task, changed_files)` | `repoctx risk-report "task" --changed a.py b.py` | Before finalizing |
 | `refresh(task, changed_files, current_scope)` | `repoctx refresh "task" --changed a.py ...` | Scope expanded mid-task |
 | `semantic_search(query, top_k, kind)` | `repoctx semantic-search "query" --top 10` | Raw similarity lookup, no bundling |
+| `advisory_search(query, top_k)` | `repoctx advisory-search "query"` | "Is this being built on another branch?" (opt-in, lower authority) |
 
 Every bundle also carries self-recall rules — `when_to_recall_repoctx`, `before_finalize_checklist`, `uncertainty_rule` — so the agent knows when to call back without you reminding it.
+
+Every `bundle` / `semantic_search` response also reports **retrieval health**. `bundle` carries a top-level `warnings[]` and a `retrieval` block (`ranker`, `index_status`, `index_location`); `semantic_search` returns an envelope `{status, message, results}`. If `index_status` isn't `ok` (e.g. `no_index`), embedding retrieval is **dark** and results are lexical-only — the warning says how to fix it. An empty `results` with `status: no_index` is *not* "no matches".
 
 (A legacy `get_task_context(task)` entry point is still supported — see the [appendix](#legacy-and-migration-notes).)
 
@@ -240,17 +243,48 @@ cd /path/to/repo
 repoctx install                          # builds index automatically
 ```
 
-Add `.repoctx/` to `.gitignore`.
+Add `.repoctx/` to `.gitignore` (it holds per-repo config, feedback logs, and — for non-git dirs — the index).
 
 **Manual control:**
 
 ```bash
-repoctx index                       # build the index
+repoctx index                       # build the index (from origin/main by default)
+repoctx index --source worktree     # index the current working tree instead
+repoctx index --refresh             # fetch origin/main + re-embed the delta
 repoctx update src/billing/foo.py   # re-embed a single file
 repoctx rebuild                     # rebuild from scratch
 ```
 
-The indexer splits each file into overlapping chunks — symbol-aware for code (function/class/method boundaries), paragraph-aware for prose — and stores them with metadata (`file:`, `kind:`, `module:`, `symbol:`, `lines:`) under `.repoctx/embeddings/`.
+The indexer splits each file into overlapping chunks — symbol-aware for code (function/class/method boundaries), paragraph-aware for prose — and stores them with metadata (`file:`, `kind:`, `module:`, `symbol:`, `lines:`).
+
+### Where the index lives (worktree-aware)
+
+The index is keyed by **repo identity**, not by the directory you ran from. It's stored under the repository's shared git common dir — `<git-common-dir>/repoctx/embeddings` (typically `<repo>/.git/repoctx/embeddings`) — which **every linked worktree and the main checkout resolve to identically**. Build it once from any worktree and it's found from all of them. Because it lives under `.git/`, it never shows up as dirty/untracked and is never committed. (Repos without git fall back to the legacy in-tree `<repo>/.repoctx/embeddings`.)
+
+Pre-1.5 in-tree indexes are migrated automatically: the first read or `repoctx index` relocates `<repo>/.repoctx/embeddings` to the shared location (it's read in place if the move can't happen).
+
+### Pinned to origin/main, refreshed on a TTL
+
+The authoritative index reflects **`origin/main`** — landed work — read directly from git objects (`git ls-tree`/`cat-file`), independent of whatever branch a worktree is on. This matters for repos that squash-merge and delete branches: mid-session `origin/main` advances and merged branches vanish, so the ground truth lives only in main.
+
+- A `git fetch origin main` is **TTL-gated** (default 30 min; `REPOCTX_BASE_FETCH_TTL_SECONDS`) so it isn't paid on every call.
+- When origin/main has advanced past the indexed base, the next read re-embeds just the delta (incremental, capped). Set `REPOCTX_BASE_REFRESH_ON_READ=0` for warn-only — you'll get a `warnings[]` entry pointing at `repoctx index --refresh` instead of a synchronous re-embed.
+
+### Your in-progress work is overlaid
+
+On top of the origin/main base, the **current worktree's delta** — commits ahead of origin/main (`merge-base..HEAD`) plus uncommitted/untracked edits — is layered in at query time. So retrieval models *"fresh origin/main ∪ my in-progress work"* (what the tree will look like after a rebase) without you rebasing. Only the delta is embedded per query (cached by content hash). Disable with `REPOCTX_OVERLAY_WORKTREE=0`.
+
+### Advisory lane (opt-in): in-flight branches
+
+A separate, **strictly lower-authority** lane answers *"is this already being built elsewhere?"* by indexing committed branch tips **ahead of origin/main** (recent, unmerged, deduped; read from git objects — never sibling worktrees' uncommitted bytes). It's **off by default**:
+
+```bash
+repoctx advisory-index                       # build it (opt-in)
+repoctx advisory-search "rate limiter"       # query it
+repoctx bundle "task" --include-advisory     # attach hits under a separate `advisory` key
+```
+
+Advisory hits are tagged with provenance (branch, commits-ahead, last-commit date, merge status) and are **never** folded into a bundle's `relevant_code` / `authority` / `constraints`.
 
 **Scoring:**
 
@@ -268,10 +302,13 @@ Default `embedding_weight` is 12.0. Files with cosine similarity above 0.3 bypas
 | `REPOCTX_EMBEDDING_BATCH_SIZE` | `16` | Clamped to 8 on MPS |
 | `REPOCTX_EMBEDDING_MAX_SEQ_LENGTH` | `256` | |
 | `REPOCTX_EMBEDDING_DTYPE` | `auto` | `fp16` on accelerators, `fp32` on CPU |
+| `REPOCTX_BASE_FETCH_TTL_SECONDS` | `1800` | How often the read path may `git fetch origin main` |
+| `REPOCTX_BASE_REFRESH_ON_READ` | `1` | `0` = warn-only on origin/main drift (no on-read re-embed) |
+| `REPOCTX_OVERLAY_WORKTREE` | `1` | `0` = retrieval reflects pure origin/main (no worktree overlay) |
 
 > **Apple silicon (MPS):** indexing handles GPU memory automatically (fp16, `max_seq_length=256`, batch clamped to 8, cache eviction between super-batches). Catchable encode errors fall back to CPU transparently. The rare uncatchable Metal C++ assertion still requires `REPOCTX_EMBEDDING_DEVICE=cpu repoctx index`.
 
-**Fallback:** if embedding dependencies aren't installed or no index exists, RepoCtx silently falls back to pure heuristic retrieval. The MCP tool contract is unchanged.
+**Fallback is loud, not silent.** If embedding dependencies aren't installed or no index exists, RepoCtx falls back to heuristic (lexical) retrieval — but it *says so*: `bundle` adds a top-level `warnings[]` entry and sets `retrieval.index_status`; `semantic_search` returns `status: no_index` (not a bare empty list). The fix (`repoctx index`) is in the message. The MCP tool contract is otherwise unchanged.
 
 > Migrating an older index? See [Legacy and migration notes](#legacy-and-migration-notes) in the appendix.
 
@@ -299,7 +336,8 @@ repoctx query "your task" --debug-scores   # show heuristic/embedding/final brea
 **Subcommands** (`repoctx COMMAND --help` for each):
 
 - `query` (default), `bundle`, `authority`, `scope`, `validate-plan`, `risk-report`, `refresh`, `detect-changes`, `semantic-search`
-- `index`, `update`, `rebuild`
+- `advisory-index`, `advisory-search` (opt-in in-flight-branch lane)
+- `index` (`--source origin-main|worktree`, `--refresh`), `update`, `rebuild`
 - `install`, `install-claude-code`, `install-cursor`, `install-codex`
 - `init-authority`, `propose-authority`
 - `experiment`, `hook`, `stats`
@@ -413,6 +451,15 @@ More detail: **[docs/experiment-mcp-suppression.md](docs/experiment-mcp-suppress
 **Legacy MCP entry point.** The original v1 tool `get_task_context(task)` is still exposed and works as a basic context-pack call. It's superseded by `bundle(task)`, which returns the same context plus authority records, constraints, edit scope, validation plan, and risk notes. New integrations should call `bundle`.
 
 **Embedding index schema.** The on-disk index format changed in 1.0.0 (`schema_version: 2`). Indexes built before 1.0.0 raise `IndexSchemaMismatch` on load — delete `.repoctx/embeddings/` and re-run `repoctx index` once after upgrading.
+
+**Index location moved (1.5.0).** The embedding index moved from the in-tree `<repo>/.repoctx/embeddings` to the shared `<git-common-dir>/repoctx/embeddings`, so all worktrees of a repo share one index. Migration is automatic on the next read or `repoctx index` (the old dir is moved up, or read in place if the move fails). No action needed; you can delete a leftover in-tree `.repoctx/embeddings` once the shared one exists.
+
+**Tradeoffs & decisions (1.5.0).**
+
+- *Shared-index location.* Keying on the git common dir (vs. a hashed global cache) means zero GC surface, automatic filesystem sharing across worktrees, and the index never appears as dirty/untracked. The cost: if you move `.git`, the index is "lost" — but it's a derived cache, so just rebuild.
+- *Fetch cadence.* `git fetch origin main` is TTL-gated (default 30 min) and the attempt time is recorded even on failure, so an offline repo isn't hammered. The re-embed of an advanced base is incremental and capped (`base_refresh_max_files`, default 200); past the cap, or with `REPOCTX_BASE_REFRESH_ON_READ=0`, you get a warning instead of a synchronous re-embed.
+- *Overlay scope.* Only *your* worktree's delta is overlaid. Sibling worktrees' uncommitted bytes are deliberately never indexed (dirty, half-finished, multi-tool) — the advisory lane uses committed branch tips instead.
+- *Advisory authority.* The advisory lane is a separate index and a separate response key; it is never merged into authoritative results, preserving the bundle's trust model (authoritative = live origin/main + your overlay only).
 
 **Nudge block format.** The anchored `<!-- repoctx-nudge -->` block in `CLAUDE.md` / `AGENTS.md` evolved between releases. Older anchored blocks are rewritten in place on the next `install` / `refresh` without touching surrounding doc content — no manual cleanup needed.
 

@@ -196,6 +196,30 @@ class EmbeddingConfig:
     debounce_n: int = 10
     debounce_max_age_seconds: int = 300
     queue_filename: str = ".pending"
+    # Authoritative index is pinned to origin/main. These gate how the read
+    # path keeps it fresh without paying a fetch (or re-embed) on every call.
+    # TTL between `git fetch origin main` attempts on the read path.
+    base_fetch_ttl_seconds: int = 1800
+    # When origin/main advances past the indexed base, re-embed the delta on
+    # the next read (TTL-gated). Off → only a staleness warning is surfaced and
+    # the user must run `repoctx index --refresh` explicitly.
+    base_refresh_on_read: bool = True
+    # Skip the on-read re-embed (warn instead) when more than this many files
+    # changed — a large delta means `repoctx index` is the better call.
+    base_refresh_max_files: int = 200
+    # Overlay the current worktree's delta (commits ahead of origin/main +
+    # uncommitted edits) on top of the origin/main base at query time, so
+    # in-progress work is retrievable as if already rebased. Off → retrieval
+    # reflects pure origin/main.
+    overlay_worktree: bool = True
+    # Safety cap: skip the overlay (too expensive) past this many delta files.
+    overlay_max_files: int = 300
+    # Advisory lane: a SEPARATE, opt-in index over committed branch tips ahead
+    # of origin/main ("is this already being done elsewhere?"). Never mixed
+    # into authoritative results. These bound which branches qualify.
+    advisory_max_age_days: int = 30
+    advisory_max_branches: int = 25
+    advisory_max_files_per_branch: int = 60
 
 
 DEFAULT_EMBEDDING_CONFIG = EmbeddingConfig()

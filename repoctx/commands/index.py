@@ -7,29 +7,54 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-from repoctx.config import DEFAULT_EMBEDDING_CONFIG
-
 logger = logging.getLogger(__name__)
 
 
-def _build_and_save_index(repo: Path, *, incremental: bool = False) -> None:
+def _build_and_save_index(
+    repo: Path, *, incremental: bool = False, source: str = "origin-main",
+) -> None:
     try:
         from repoctx.embeddings import build_index
     except ImportError:
         print("Embedding dependencies not installed. Run: pip install 'repoctx-mcp[embeddings]'", file=sys.stderr)
         raise SystemExit(1)
 
+    from repoctx.index_location import migrate_legacy_index_if_needed, shared_embeddings_dir
+
     repo = repo.resolve()
+    # Pull any pre-1.5 in-tree index up to the shared location first so an
+    # incremental build splices onto it instead of re-embedding from scratch.
+    migrate_legacy_index_if_needed(repo)
     try:
-        record_store = build_index(repo, incremental=incremental)
+        record_store = build_index(repo, incremental=incremental, source=source)
     except ImportError as exc:
         print(f"{exc}", file=sys.stderr)
         raise SystemExit(1)
-    emb_dir = repo / DEFAULT_EMBEDDING_CONFIG.index_dir / "embeddings"
+    emb_dir = shared_embeddings_dir(repo)
     record_store.save(emb_dir)
     unique_files = len({e.path for e in record_store.entries})
     mode = "incrementally" if incremental else "fully"
-    print(f"Indexed {len(record_store)} chunks across {unique_files} files ({mode}) → {emb_dir}")
+    built_from = record_store.source_meta.get("built_from", source)
+    base = record_store.source_meta.get("base_ref")
+    suffix = f" from {base}" if base else ""
+    print(
+        f"Indexed {len(record_store)} chunks across {unique_files} files "
+        f"({mode}, {built_from}{suffix}) → {emb_dir}"
+    )
+
+
+def _refresh_index(repo: Path) -> None:
+    try:
+        from repoctx.embeddings import refresh_base_index
+    except ImportError:
+        print("Embedding dependencies not installed. Run: pip install 'repoctx-mcp[embeddings]'", file=sys.stderr)
+        raise SystemExit(1)
+    from repoctx.index_location import migrate_legacy_index_if_needed
+
+    repo = repo.resolve()
+    migrate_legacy_index_if_needed(repo)
+    result = refresh_base_index(repo, force=True, fetch=True, embed=True, build_if_missing=True)
+    print(json.dumps(result, indent=2))
 
 
 # -- index --------------------------------------------------------------------
@@ -48,10 +73,35 @@ def _register_index(subparsers) -> None:
             "chunker config."
         ),
     )
+    idx.add_argument(
+        "--source",
+        choices=("origin-main", "worktree"),
+        default="origin-main",
+        help=(
+            "What to index. 'origin-main' (default) reads the tree from git "
+            "objects at origin/main (landed work; branch-independent). "
+            "'worktree' indexes the current working tree."
+        ),
+    )
+    idx.add_argument(
+        "--refresh",
+        action="store_true",
+        help=(
+            "Fetch origin/main and re-embed the delta so the index tracks the "
+            "current tip (builds from scratch if absent). Implies origin-main."
+        ),
+    )
 
 
 def _run_index(args: argparse.Namespace) -> None:
-    _build_and_save_index(Path(args.repo), incremental=getattr(args, "incremental", False))
+    if getattr(args, "refresh", False):
+        _refresh_index(Path(args.repo))
+        return
+    _build_and_save_index(
+        Path(args.repo),
+        incremental=getattr(args, "incremental", False),
+        source=getattr(args, "source", "origin-main"),
+    )
 
 
 index_cmd = SimpleNamespace(NAME="index", register=_register_index, run=_run_index)
@@ -68,11 +118,15 @@ def _register_rebuild(subparsers) -> None:
 def _run_rebuild(args: argparse.Namespace) -> None:
     import shutil
 
+    from repoctx.index_location import legacy_embeddings_dir, shared_embeddings_dir
+
     repo = Path(args.repo).resolve()
-    emb_dir = repo / DEFAULT_EMBEDDING_CONFIG.index_dir / "embeddings"
-    if emb_dir.exists():
-        shutil.rmtree(emb_dir)
-        logger.info("Removed existing index at %s", emb_dir)
+    # Wipe both the shared and any lingering legacy in-tree index so rebuild
+    # leaves exactly one index, at the shared location.
+    for emb_dir in {shared_embeddings_dir(repo), legacy_embeddings_dir(repo)}:
+        if emb_dir.exists():
+            shutil.rmtree(emb_dir)
+            logger.info("Removed existing index at %s", emb_dir)
     _build_and_save_index(repo)
 
 
