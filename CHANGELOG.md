@@ -6,6 +6,15 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.5.1] — 2026-05-21
+
+### Added
+
+- `repoctx --version` flag — prints the installed version and exits. Previously
+  argparse rejected it with "unrecognized arguments". Resolves via
+  `importlib.metadata`, with a safe `unknown` fallback when run from an
+  uninstalled source tree.
+
 ## [1.5.0] — 2026-05-21
 
 ### Added — worktree-aware index pinned to live origin/main

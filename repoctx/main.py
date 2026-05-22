@@ -9,8 +9,22 @@ from repoctx.experiment_mcp import refresh_after_cli_invocation
 logger = logging.getLogger(__name__)
 
 SUBCOMMANDS = SUBCOMMAND_NAMES
-HELP_USAGE = """repoctx [-h] TASK
+HELP_USAGE = """repoctx [-h] [--version] TASK
        repoctx [-h] COMMAND ..."""
+
+
+def _get_version() -> str:
+    """Installed distribution version, or 'unknown' when run from an
+    uninstalled source tree."""
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        try:
+            return version("repoctx-mcp")
+        except PackageNotFoundError:
+            return "unknown"
+    except Exception:  # noqa: BLE001 — --version must never crash the CLI
+        return "unknown"
 HELP_EPILOG = """Default behavior:
   If the first argument is not a subcommand, RepoCtx treats it as `query`.
 
@@ -35,6 +49,12 @@ def build_parser() -> argparse.ArgumentParser:
         usage=HELP_USAGE,
         epilog=HELP_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"repoctx {_get_version()}",
+        help="Show the installed repoctx version and exit",
     )
     sub = parser.add_subparsers(
         dest="command",

@@ -17,6 +17,20 @@ from repoctx.telemetry import (
 )
 
 
+def test_cli_version_flag_prints_and_exits_zero(capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        repoctx_main.build_parser().parse_args(["--version"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert out.startswith("repoctx ")
+    assert out.split()[1]  # a non-empty version token follows
+
+
+def test_get_version_never_raises() -> None:
+    # Falls back to a string (never crashes) even if metadata is unavailable.
+    assert isinstance(repoctx_main._get_version(), str)
+
+
 def run_git(repo: Path, *args: str) -> str:
     result = subprocess.run(
         ["git", *args],
@@ -454,7 +468,7 @@ def test_cli_help_includes_examples_and_subcommand_guidance(monkeypatch, capsys)
 
     assert exc_info.value.code == 0
     stdout = capsys.readouterr().out
-    assert "usage: repoctx [-h] TASK" in stdout
+    assert "usage: repoctx [-h] [--version] TASK" in stdout
     assert "Examples:" in stdout
     assert 'repoctx "refactor the auth middleware to support OAuth"' in stdout
     assert "repoctx query \"show me tests related to the billing webhook flow\" --repo /path/to/repo --format json" in stdout
