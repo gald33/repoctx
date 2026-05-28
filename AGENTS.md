@@ -45,6 +45,7 @@ Full release flow:
 4. Commit (`chore(release): <x.y.z> — <one-line summary>`) and push to `main`.
 5. Tag the release commit locally: `git tag v<x.y.z>` (must match `project.version` exactly — the workflow's tag-vs-version check fails otherwise).
 6. Push the tag: `git push origin v<x.y.z>`. That push triggers the workflow.
+7. **Post-release: bump `project.version` to the next planned stable** (e.g. `1.7.0` after releasing `1.6.0`). Commit as `chore: bump pyproject to <next> for canary version ordering` and push to `main`. **Without this step canary builds become invisible to `pip install --pre`** — `pyproject.version` is what canary builds compute `<version>.devN` from, and PEP 440 puts `1.6.0.devN < 1.6.0`, so a canary based on the just-released stable version sorts below stable and `--pre` resolvers pick stable instead. Pick the next bump (patch / minor / major) based on what the next release is likely to be; canary lives in that gap.
 
 The workflow fires on `v*` tag push, verifies tag-vs-version, builds wheel + sdist, and publishes via OIDC. Typical run is ~40s. Verify with `gh run list --limit 1` or `curl -fsSL https://pypi.org/pypi/repoctx-mcp/json | jq -r .info.version`.
 
