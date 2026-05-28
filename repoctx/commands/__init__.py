@@ -15,6 +15,7 @@ from repoctx.commands import (
     protocol_ops,
     query,
     reap,
+    reporting as reporting_module,
     stats,
     tune as tune_module,
 )
@@ -34,6 +35,8 @@ COMMAND_MODULES = [
     protocol_ops.refresh_cmd,
     protocol_ops.detect_changes_cmd,
     protocol_ops.semantic_search_cmd,
+    protocol_ops.advisory_index_cmd,
+    protocol_ops.advisory_search_cmd,
     install.install_all_cmd,
     install.install_claude_code_cmd,
     install.install_cursor_cmd,
@@ -45,6 +48,7 @@ COMMAND_MODULES = [
     reap.reap_cmd,
     eval_module.eval_cmd,
     tune_module.tune_cmd,
+    reporting_module,
 ]
 
 COMMAND_HANDLERS = {mod.NAME: mod.run for mod in COMMAND_MODULES}

@@ -22,32 +22,60 @@ def scan_repository(
 
     for path in _iter_files(root, config):
         rel_path = path.relative_to(root).as_posix()
-        extension = path.suffix.lower()
-        kind = _classify_file(rel_path, extension, config)
-        doc_score = _score_doc(rel_path) if kind == "doc" else 0.0
         content = _read_text(path, config.max_file_bytes)
-        subkind = classify_subkind(kind, rel_path, content)
-        record = FileRecord(
-            path=rel_path,
-            absolute_path=path,
-            extension=extension,
-            kind=kind,
-            subkind=subkind,
-            content=content,
-            doc_score=doc_score,
-        )
-        index.records[rel_path] = record
-        if kind == "doc":
-            index.docs.append(record)
-        elif kind == "code":
-            index.code_files.append(record)
-        elif kind == "test":
-            index.test_files.append(record)
-        elif kind == "config":
-            index.config_files.append(record)
+        record = build_file_record(rel_path, content, root, config)
+        _add_record(index, record)
 
     index.docs.sort(key=lambda item: (-item.doc_score, item.path))
     return index
+
+
+def build_file_record(
+    rel_path: str,
+    content: str,
+    root: str | Path,
+    config: RepoCtxConfig = DEFAULT_CONFIG,
+) -> FileRecord:
+    """Classify a single file into a :class:`FileRecord` from its content.
+
+    Shared by the working-tree scan and the git-object scan
+    (:func:`repoctx.git_tree.scan_git_tree`) so both classify identically.
+    ``absolute_path`` is the working-tree location (which may not exist on disk
+    when the record came from a git blob in another branch).
+    """
+    extension = PurePosixPath(rel_path).suffix.lower()
+    kind = _classify_file(rel_path, extension, config)
+    doc_score = _score_doc(rel_path) if kind == "doc" else 0.0
+    subkind = classify_subkind(kind, rel_path, content)
+    return FileRecord(
+        path=rel_path,
+        absolute_path=Path(root) / rel_path,
+        extension=extension,
+        kind=kind,
+        subkind=subkind,
+        content=content,
+        doc_score=doc_score,
+    )
+
+
+def _add_record(index: RepositoryIndex, record: FileRecord) -> None:
+    index.records[record.path] = record
+    if record.kind == "doc":
+        index.docs.append(record)
+    elif record.kind == "code":
+        index.code_files.append(record)
+    elif record.kind == "test":
+        index.test_files.append(record)
+    elif record.kind == "config":
+        index.config_files.append(record)
+
+
+def is_supported_path(rel_path: str, config: RepoCtxConfig = DEFAULT_CONFIG) -> bool:
+    """True if ``rel_path`` is one repoctx would scan (extension + not ignored)."""
+    pure = PurePosixPath(rel_path)
+    if pure.suffix.lower() not in config.supported_extensions:
+        return False
+    return not any(part in config.ignored_dirs for part in pure.parts)
 
 
 def _iter_files(root: Path, config: RepoCtxConfig) -> list[Path]:

@@ -72,30 +72,41 @@ def _build_repo_with_index(
 
 
 def _patched_retriever(repo: Path, query_vec: "numpy.ndarray"):
-    """Patch try_load_retriever to return a retriever using a fake model."""
+    """Patch load_retriever_status to return an ok status with a fake model."""
+    from repoctx.embeddings import RetrieverStatus, STATUS_OK
     from repoctx.vector_index import VectorIndex as _VI
 
     loaded = _VI.load(repo / ".repoctx" / "embeddings")
     retriever = EmbeddingRetriever(model=_FakeModel(query_vec), index=loaded)
+    status = RetrieverStatus(
+        retriever=retriever, status=STATUS_OK, message="",
+        index_dir=str(repo / ".repoctx" / "embeddings"),
+    )
     return patch(
-        "repoctx.ops.semantic_search.try_load_retriever",
-        return_value=retriever,
+        "repoctx.ops.semantic_search.load_retriever_status",
+        return_value=status,
     )
 
 
 # -- empty / cold-start -------------------------------------------------------
 
 
-def test_returns_empty_list_when_no_index(tmp_path: Path, caplog) -> None:
-    """No index built yet → empty list, with an info-level log message."""
-    caplog.set_level("INFO", logger="repoctx.ops.semantic_search")
-    hits = op_semantic_search("anything", repo_root=tmp_path, top_k=5)
-    assert hits == []
-    assert any("no embedding index" in r.getMessage().lower() for r in caplog.records)
+def test_no_index_returns_loud_status_not_bare_empty(tmp_path: Path) -> None:
+    """No index built yet → explicit no_index status, not a bare empty list.
+
+    This is the fail-loud contract: an empty `results` must be distinguishable
+    from "index missing" so retrieval can't go dark unnoticed.
+    """
+    result = op_semantic_search("anything", repo_root=tmp_path, top_k=5)
+    assert result["status"] == "no_index"
+    assert result["results"] == []
+    assert "repoctx index" in result["message"]
+    assert result["repo"] == str(tmp_path.resolve())
 
 
-def test_returns_empty_list_when_top_k_zero(tmp_path: Path) -> None:
-    assert op_semantic_search("q", repo_root=tmp_path, top_k=0) == []
+def test_returns_empty_results_when_top_k_zero(tmp_path: Path) -> None:
+    result = op_semantic_search("q", repo_root=tmp_path, top_k=0)
+    assert result["results"] == []
 
 
 # -- ranking & filtering ------------------------------------------------------
@@ -140,7 +151,7 @@ def _three_chunk_repo(repo: Path):
 def test_returns_top_k_sorted_descending(tmp_path: Path) -> None:
     query_vec = _three_chunk_repo(tmp_path)
     with _patched_retriever(tmp_path, query_vec):
-        hits = op_semantic_search("login", repo_root=tmp_path, top_k=2)
+        hits = op_semantic_search("login", repo_root=tmp_path, top_k=2)["results"]
     assert len(hits) == 2
     assert [h["score"] for h in hits] == sorted(
         [h["score"] for h in hits], reverse=True,
@@ -159,7 +170,7 @@ def test_returns_top_k_sorted_descending(tmp_path: Path) -> None:
 def test_top_k_caps_result_count(tmp_path: Path) -> None:
     query_vec = _three_chunk_repo(tmp_path)
     with _patched_retriever(tmp_path, query_vec):
-        hits = op_semantic_search("auth", repo_root=tmp_path, top_k=1)
+        hits = op_semantic_search("auth", repo_root=tmp_path, top_k=1)["results"]
     assert len(hits) == 1
 
 
@@ -168,10 +179,10 @@ def test_kind_filter_narrows_results(tmp_path: Path) -> None:
     with _patched_retriever(tmp_path, query_vec):
         code_hits = op_semantic_search(
             "auth", repo_root=tmp_path, top_k=10, kind="code",
-        )
+        )["results"]
         doc_hits = op_semantic_search(
             "auth", repo_root=tmp_path, top_k=10, kind="doc",
-        )
+        )["results"]
     assert len(code_hits) == 2
     assert {h["path"] for h in code_hits} == {"src/auth.py"}
     assert len(doc_hits) == 1
@@ -184,7 +195,7 @@ def test_kind_filter_unknown_value_ignored(tmp_path: Path) -> None:
     with _patched_retriever(tmp_path, query_vec):
         hits = op_semantic_search(
             "auth", repo_root=tmp_path, top_k=10, kind="bogus",
-        )
+        )["results"]
     assert len(hits) == 3
 
 
@@ -194,7 +205,7 @@ def test_kind_filter_unknown_value_ignored(tmp_path: Path) -> None:
 def test_snippet_contains_claimed_line_range(tmp_path: Path) -> None:
     query_vec = _three_chunk_repo(tmp_path)
     with _patched_retriever(tmp_path, query_vec):
-        hits = op_semantic_search("auth", repo_root=tmp_path, top_k=3)
+        hits = op_semantic_search("auth", repo_root=tmp_path, top_k=3)["results"]
 
     by_lines = {(h["start_line"], h["end_line"]): h for h in hits}
     # First chunk: lines 1-10 of src/auth.py.
@@ -226,7 +237,7 @@ def test_snippet_truncated_to_max_chars(tmp_path: Path) -> None:
     query_vec = _normalised([1.0, 0.0, 0.0, 0.0])
     _build_repo_with_index(tmp_path, files=files, chunks=chunks, query_vec=query_vec)
     with _patched_retriever(tmp_path, query_vec):
-        hits = op_semantic_search("big", repo_root=tmp_path, top_k=1)
+        hits = op_semantic_search("big", repo_root=tmp_path, top_k=1)["results"]
     assert len(hits[0]["snippet"]) <= 500
 
 
@@ -244,6 +255,6 @@ def test_missing_source_file_returns_empty_snippet(tmp_path: Path) -> None:
     query_vec = _normalised([1.0, 0.0, 0.0, 0.0])
     _build_repo_with_index(tmp_path, files=files, chunks=chunks, query_vec=query_vec)
     with _patched_retriever(tmp_path, query_vec):
-        hits = op_semantic_search("anything", repo_root=tmp_path, top_k=1)
+        hits = op_semantic_search("anything", repo_root=tmp_path, top_k=1)["results"]
     assert hits[0]["path"] == "missing.py"
     assert hits[0]["snippet"] == ""

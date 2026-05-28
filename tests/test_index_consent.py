@@ -55,15 +55,19 @@ def _config(repo_root: Path) -> dict:
 
 
 def _seed_built_index(repo_root: Path) -> None:
-    """Create a non-empty `.repoctx/embeddings/` so is_index_present returns True.
+    """Create a ``vectors.npy`` marker so is_index_present returns True.
 
-    We don't need a real VectorIndex on disk — `is_index_present` only checks
-    for a non-empty directory. Tests that need an actual loadable index would
-    use the embedding spy pattern from `tests/test_embeddings.py`.
+    We don't need a real VectorIndex on disk — `is_index_present` matches
+    `index_location._has_index` and only checks for ``vectors.npy``. Tests
+    that need an actual loadable index use the embedding spy pattern from
+    `tests/test_embeddings.py`. We seed at the resolved location (which for
+    our fake-``.git`` test fixture is the legacy in-tree path).
     """
-    emb = repo_root / ".repoctx" / "embeddings"
+    from repoctx.index_consent import embeddings_dir
+
+    emb = embeddings_dir(repo_root)
     emb.mkdir(parents=True, exist_ok=True)
-    (emb / "marker").write_text("present", encoding="utf-8")
+    (emb / "vectors.npy").write_bytes(b"")
 
 
 # --- pure module ------------------------------------------------------------
@@ -135,11 +139,21 @@ def test_set_consent_rejects_invalid_value(tmp_repo: Path) -> None:
         set_consent(tmp_repo, "maybe")  # type: ignore[arg-type]
 
 
-def test_is_index_present_treats_empty_dir_as_absent(tmp_repo: Path) -> None:
-    (tmp_repo / ".repoctx" / "embeddings").mkdir(parents=True)
-    # Empty dir from an interrupted build shouldn't count as a built index.
+def test_is_index_present_requires_vectors_marker(tmp_repo: Path) -> None:
+    """Matches `index_location._has_index`: bare dirs or stray files don't count.
+
+    Only ``vectors.npy`` — the artifact a real build always produces — flips
+    presence to True. Anything else (an empty dir from an interrupted build,
+    or a leftover scaffold file) stays False.
+    """
+    from repoctx.index_consent import embeddings_dir
+
+    emb = embeddings_dir(tmp_repo)
+    emb.mkdir(parents=True)
     assert is_index_present(tmp_repo) is False
-    (tmp_repo / ".repoctx" / "embeddings" / "x").write_text("y", encoding="utf-8")
+    (emb / "stray.txt").write_text("y", encoding="utf-8")
+    assert is_index_present(tmp_repo) is False
+    (emb / "vectors.npy").write_bytes(b"")
     assert is_index_present(tmp_repo) is True
 
 
@@ -225,9 +239,9 @@ def test_bundle_includes_consent_prompt_on_first_call(tmp_repo: Path) -> None:
     assert "index_consent_prompt" not in second
 
 
-def test_semantic_search_wraps_list_on_first_call(tmp_repo: Path) -> None:
-    """semantic_search returns a dict (wrapping the list) only on the cold-start
-    call; once the prompt has been shown, the response goes back to a bare list.
+def test_semantic_search_attaches_consent_prompt_on_first_call(tmp_repo: Path) -> None:
+    """semantic_search returns its envelope dict either way; we just attach
+    `index_consent_prompt` on the cold-start call and drop it on subsequent ones.
     """
     _write_file(tmp_repo / "src" / "retry.py", "def retry():\n    return True\n")
     with patch("repoctx.index_consent.embeddings_available", return_value=True):
@@ -236,10 +250,12 @@ def test_semantic_search_wraps_list_on_first_call(tmp_repo: Path) -> None:
         first = tool.fn(query="retry")
         second = tool.fn(query="retry")
     assert isinstance(first, dict)
+    # Envelope is preserved (results + status from op_semantic_search).
     assert first["results"] == []  # no index → no hits
+    assert first["status"] != "ok"  # status is no_index/deps_missing/etc.
     assert "index_consent_prompt" in first
-    assert isinstance(second, list)
-    assert second == []
+    assert isinstance(second, dict)
+    assert "index_consent_prompt" not in second
 
 
 def test_index_tool_decline_records_consent(tmp_repo: Path) -> None:

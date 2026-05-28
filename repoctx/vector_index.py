@@ -61,6 +61,11 @@ class VectorIndex:
     # index_config.json so incremental rebuilds can refuse to splice when the
     # chunker config changed (which would invalidate per-chunk hash keys).
     chunk_config: dict[str, Any] = field(default_factory=dict)
+    # Provenance of the indexed content: which ref/sha it was built from and
+    # how (``built_from``: "origin-main" | "worktree"). Lets the read path
+    # detect when origin/main has advanced past the indexed base. Additive and
+    # optional — older indexes simply have an empty dict.
+    source_meta: dict[str, Any] = field(default_factory=dict)
 
     def __len__(self) -> int:
         return len(self.entries)
@@ -154,6 +159,8 @@ class VectorIndex:
         }
         if self.chunk_config:
             config["chunk_config"] = self.chunk_config
+        if self.source_meta:
+            config["source_meta"] = self.source_meta
         (d / INDEX_CONFIG_FILE).write_text(json.dumps(config, indent=2), encoding="utf-8")
         logger.info("Saved vector index (%d entries) → %s", len(self.entries), d)
 
@@ -212,6 +219,7 @@ class VectorIndex:
             model_name=config.get("model_name", ""),
             dimension=config.get("dimension", 0),
             chunk_config=config.get("chunk_config", {}) or {},
+            source_meta=config.get("source_meta", {}) or {},
         )
 
     # ---- single-entry mutation ----------------------------------------------

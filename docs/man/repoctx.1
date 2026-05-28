@@ -30,13 +30,25 @@ treats it as a query task.
 Retrieve context for a task. This is the default command.
 .TP
 .B index
-Build the embedding index for a repository.
+Build the embedding index for a repository. Defaults to indexing
+.B origin/main
+(read from git objects); use
+.B \-\-source worktree
+to index the working tree, or
+.B \-\-refresh
+to fetch origin/main and re-embed the delta.
 .TP
 .B update
 Re-embed a single file in the index.
 .TP
 .B rebuild
 Delete and rebuild the embedding index.
+.TP
+.B advisory\-index
+Build the opt-in advisory index over committed branches ahead of origin/main.
+.TP
+.B advisory\-search
+Search the advisory lane (in-flight branches; not authoritative).
 .TP
 .B experiment
 Launch or resume a guided control versus treatment experiment with paired worktrees.
@@ -95,7 +107,12 @@ repoctx experiment "refactor the auth middleware to support OAuth"
 .I ~/.repoctx/config.json
 Optional RepoCtx user settings (for example experiment MCP suppression timing).
 .TP
+.I <git-common-dir>/repoctx/embeddings/
+Embedding index directory, keyed by repo identity and shared across all
+worktrees (typically
+.IR <repo>/.git/repoctx/embeddings/ ).
+Falls back to the in-tree
 .I .repoctx/embeddings/
-Default repository-local embedding index directory.
+for non-git directories.
 .SH SEE ALSO
 .BR python (1)

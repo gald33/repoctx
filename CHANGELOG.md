@@ -6,6 +6,94 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added — anonymous reporting + canary release channel
+
+Optional opt-in upload layer (`repoctx.reporting`) on top of the existing
+local telemetry. Stable installs default OFF with no prompts ever; canary
+installs default ON with a one-time stderr disclosure. Designed so a stable
+install that never opts in produces zero files on disk.
+
+- **Privacy contract.** Uploaded payloads carry counts, timings, and error
+  *classes* only — never paths, queries, code, error messages, git remote
+  URLs, hostnames, or anything correlatable across users. Repo identity is
+  `sha256(install_id || first_commit_sha)` so it's stable per (install,
+  repo) but not joinable across users. Server-side forbidden-key
+  enforcement provides defense in depth.
+
+- **Surface.** CLI `repoctx reporting {status,on,off,show,flush}`; MCP
+  `reporting` tool with the same actions so an agent can inspect or flip
+  the flag on the user's behalf; `REPOCTX_REPORTING=off` env kill switch.
+
+- **Canary channel.** Pre-release wheels published via
+  `pip install --pre repoctx-mcp`. `repoctx/_build_channel.py` carries the
+  baked-in `CHANNEL` and `BUILD_ID`; the release pipeline rewrites it for
+  canary builds. No auto-update — users upgrade when they choose.
+
+- **CI integration.** Existing OIDC-based PyPI workflow extended with a
+  `workflow_dispatch` channel input; canary path runs
+  `scripts/release.py --channel canary --prepare-only` before
+  `python -m build`. Trigger with
+  `gh workflow run publish-pypi.yml -f channel=canary`.
+
+- **Ingest endpoint.** Cloudflare Worker + D1 at
+  `https://repoctx-reports.repoctx.workers.dev` (`server/`). Worker rejects
+  events containing any forbidden top-level key independently from the
+  client.
+
+## [1.5.1] — 2026-05-21
+
+### Added
+
+- `repoctx --version` flag — prints the installed version and exits. Previously
+  argparse rejected it with "unrecognized arguments". Resolves via
+  `importlib.metadata`, with a safe `unknown` fallback when run from an
+  uninstalled source tree.
+
+## [1.5.0] — 2026-05-21
+
+### Added — worktree-aware index pinned to live origin/main
+
+Fixes silent retrieval degradation when repoctx is used from a git worktree:
+the index lived in the working tree, so a worktree never found the index built
+in the main checkout and quietly fell back to lexical ranking.
+
+- **Index keyed by repo identity, shared across worktrees.** Stored at
+  `<git-common-dir>/repoctx/embeddings` (resolved via
+  `git rev-parse --git-common-dir`) instead of `<cwd>/.repoctx/embeddings`, so
+  every worktree and the main checkout share one index. Lives under `.git/`, so
+  it's never tracked or seen as dirty. `recent_repos.json` is deduped by
+  identity so worktrees collapse to one entry. New `repoctx/index_location.py`,
+  `git_state.git_common_dir()`.
+
+- **Fail loud instead of silent lexical fallback.** `semantic_search` now
+  returns an envelope `{status, message, results}` (`no_index` ≠ "no matches");
+  `bundle` carries top-level `warnings[]` and a `retrieval` block
+  (`ranker`/`index_status`/`index_location`). New
+  `embeddings.load_retriever_status()` / `probe_index_status()`.
+
+- **Authoritative index pinned to `origin/main`, read from git objects.** New
+  `repoctx/git_tree.py` reads the tree via `ls-tree`/`cat-file` (no checkout),
+  so landed work is retrievable even from a branch that predates it. `git fetch`
+  is TTL-gated; `repoctx index` defaults to `--source origin-main` (`--source
+  worktree` opts out); `repoctx index --refresh` re-embeds the delta. Read-path
+  auto-refresh is TTL-gated and capped (`REPOCTX_BASE_REFRESH_ON_READ=0` for
+  warn-only).
+
+- **Worktree delta overlaid at query time.** Commits ahead of origin/main plus
+  uncommitted edits are embedded on the fly and layered over the base, so
+  in-progress work is retrievable as if rebased. New `repoctx/overlay.py`
+  (`REPOCTX_OVERLAY_WORKTREE=0` to disable).
+
+- **Opt-in advisory lane** (`repoctx/advisory.py`) over committed branches ahead
+  of origin/main, for "is this already being built elsewhere?". Separate index,
+  separate response key, provenance-tagged (branch / commits-ahead /
+  last-commit-date / merge-status), never mixed into authoritative results. New
+  `advisory_search` MCP tool, `advisory-index` / `advisory-search` CLI, and a
+  `bundle(include_advisory=True)` flag.
+
+- **Automatic migration** of pre-existing in-tree `.repoctx/embeddings` to the
+  shared location on the next read or `repoctx index`.
+
 ## [1.4.0] — 2026-05-14
 
 ### Added — per-repo retrieval tuning loop (feedback events + MAP-fit model)

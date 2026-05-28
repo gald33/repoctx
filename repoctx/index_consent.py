@@ -84,23 +84,29 @@ _AGENT_INSTRUCTIONS = (
 
 
 def embeddings_dir(repo_root: str | Path, config: EmbeddingConfig = DEFAULT_EMBEDDING_CONFIG) -> Path:
-    """Resolve ``<repo>/.repoctx/embeddings`` per the embedding config."""
-    return Path(repo_root).resolve() / config.index_dir / "embeddings"
+    """Resolve the embeddings dir for ``repo_root``.
+
+    Worktree-aware via :func:`repoctx.index_location.resolve_embeddings_dir`:
+    prefers the shared per-identity location (``<git-common-dir>/repoctx/
+    embeddings``), falls back to the legacy in-tree path for non-git repos.
+    """
+    from repoctx.index_location import resolve_embeddings_dir
+
+    return resolve_embeddings_dir(repo_root, config, migrate=False)
 
 
 def is_index_present(repo_root: str | Path, config: EmbeddingConfig = DEFAULT_EMBEDDING_CONFIG) -> bool:
-    """True if the persisted vector index directory exists and is non-empty.
+    """True if a built vector index exists at the resolved location.
 
-    We check for directory contents (not just existence) so a leftover empty
-    ``.repoctx/embeddings/`` from an interrupted build doesn't fool us.
+    Matches ``index_location._has_index`` semantics by requiring
+    ``vectors.npy`` — a real built index always has it; a leftover empty dir
+    from an interrupted build (or untouched scaffold) doesn't fool us.
     """
-    d = embeddings_dir(repo_root, config)
-    if not d.is_dir():
-        return False
     try:
-        return any(d.iterdir())
-    except OSError:
+        d = embeddings_dir(repo_root, config)
+    except Exception:
         return False
+    return (d / "vectors.npy").exists()
 
 
 def embeddings_available() -> bool:

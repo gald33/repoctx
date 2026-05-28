@@ -1,0 +1,20 @@
+name = "repoctx-reports"
+main = "src/index.ts"
+compatibility_date = "2026-05-01"
+
+# Replace database_id after running `npm run db:create` — the command prints
+# a UUID that wrangler needs in order to bind the D1 database into the Worker.
+[[d1_databases]]
+binding = "DB"
+database_name = "repoctx-events"
+database_id = "c708be19-cde8-4047-a4a3-2d98ad5e3821"
+migrations_dir = "migrations"
+
+[vars]
+# Hard cap on a single POST body. Clients should batch but stay well under
+# this; the cap protects the Worker from runaway payloads.
+MAX_BATCH_BYTES = "262144"   # 256 KB
+MAX_EVENTS_PER_REQUEST = "1000"
+
+[observability]
+enabled = true

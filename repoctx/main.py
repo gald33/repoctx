@@ -9,8 +9,22 @@ from repoctx.experiment_mcp import refresh_after_cli_invocation
 logger = logging.getLogger(__name__)
 
 SUBCOMMANDS = SUBCOMMAND_NAMES
-HELP_USAGE = """repoctx [-h] TASK
+HELP_USAGE = """repoctx [-h] [--version] TASK
        repoctx [-h] COMMAND ..."""
+
+
+def _get_version() -> str:
+    """Installed distribution version, or 'unknown' when run from an
+    uninstalled source tree."""
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        try:
+            return version("repoctx-mcp")
+        except PackageNotFoundError:
+            return "unknown"
+    except Exception:  # noqa: BLE001 — --version must never crash the CLI
+        return "unknown"
 HELP_EPILOG = """Default behavior:
   If the first argument is not a subcommand, RepoCtx treats it as `query`.
 
@@ -36,6 +50,12 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=HELP_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"repoctx {_get_version()}",
+        help="Show the installed repoctx version and exit",
+    )
     sub = parser.add_subparsers(
         dest="command",
         title="Common subcommands",
@@ -53,6 +73,15 @@ def main() -> None:
     args = parser.parse_args()
     refresh_after_cli_invocation()
     logging.basicConfig(level=logging.DEBUG if getattr(args, "verbose", False) else logging.WARNING)
+
+    # No-op on stable; prints a one-time stderr disclosure on canary builds
+    # (and only on the very first invocation per install).
+    try:
+        from repoctx import reporting
+
+        reporting.maybe_show_canary_notice()
+    except Exception:  # noqa: BLE001 — disclosure must never break the CLI
+        pass
 
     cmd = args.command or "query"
     handler = COMMAND_HANDLERS.get(cmd)

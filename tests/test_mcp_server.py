@@ -35,6 +35,8 @@ def test_mcp_server_registers_get_task_context_tool() -> None:
     assert "get_task_context" in names
     # repoctx v2 protocol ops must also be registered alongside the legacy tool.
     assert {"bundle", "authority", "scope", "validate_plan", "risk_report", "refresh"}.issubset(names)
+    # Retrieval + advisory tools.
+    assert {"semantic_search", "advisory_search"}.issubset(names)
     get_tc = _get_tool(server, "get_task_context")
     assert get_tc.parameters["required"] == ["task"]
 
@@ -283,6 +285,41 @@ def test_resolve_repo_root_recency_log_dedupes_and_orders(
     log = _json.loads((cache_dir / "recent_repos.json").read_text(encoding="utf-8"))
     paths = [e["path"] for e in log]
     assert paths == [str(a.resolve()), str(b.resolve())]
+
+
+def test_recency_log_collapses_worktrees_of_same_repo(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Two worktrees of one repo must dedupe to a single recency entry."""
+    import json as _json
+    import subprocess
+
+    def _git(repo: Path, *args: str) -> None:
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+
+    main = tmp_path / "main"
+    main.mkdir()
+    _git(main, "init", "-q", "-b", "main")
+    _git(main, "config", "user.email", "t@t.t")
+    _git(main, "config", "user.name", "t")
+    (main / "f.py").write_text("x = 1\n", encoding="utf-8")
+    _git(main, "add", "f.py")
+    _git(main, "commit", "-qm", "init")
+    wt = tmp_path / "wt"
+    _git(main, "worktree", "add", "-q", str(wt), "-b", "feat")
+
+    cache_dir = tmp_path / "cache"
+    _isolate_resolution(monkeypatch, cache_dir)
+
+    monkeypatch.chdir(main)
+    resolve_repo_root(None)
+    monkeypatch.chdir(wt)
+    resolve_repo_root(None)
+
+    log = _json.loads((cache_dir / "recent_repos.json").read_text(encoding="utf-8"))
+    # Same identity (shared git common dir) → exactly one entry, the latest.
+    assert len(log) == 1
+    assert log[0]["path"] == str(wt.resolve())
 
 
 def test_mcp_server_memoizes_resolved_root_within_process(

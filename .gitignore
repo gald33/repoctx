@@ -7,6 +7,12 @@ __pycache__/
 build/
 dist/
 
+# Local secrets — PyPI token etc. Never committed; .env.example is the
+# template and IS committed.
+.env
+.env.*
+!.env.example
+
 # Claude Code: personal config + transient session state. The committable
 # project-level config (.claude/settings.json) — which `repoctx install` itself
 # writes — is intentionally NOT ignored.

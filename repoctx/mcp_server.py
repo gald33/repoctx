@@ -52,8 +52,31 @@ def _recent_repos_path() -> Path:
 _RECENT_REPOS_LIMIT = 10
 
 
+def _identity_key(repo_root: Path) -> str:
+    """Stable per-repo identity used to collapse worktrees to one entry.
+
+    All worktrees of a repo share one git common dir, so keying on it means a
+    repo appears once in the recency log regardless of which worktree (or the
+    main checkout) invoked repoctx. Falls back to the resolved path when not a
+    git repo.
+    """
+    try:
+        from repoctx.git_state import git_common_dir
+
+        common = git_common_dir(repo_root)
+        if common is not None:
+            return str(common)
+    except Exception:  # noqa: BLE001 — identity is best-effort
+        pass
+    return str(Path(repo_root).resolve())
+
+
 def _read_recent_repos() -> list[Path]:
-    """Return recent repos in most-recent-first order, filtered to live ones."""
+    """Return recent repos in most-recent-first order, filtered to live ones.
+
+    Deduped by repo *identity* (git common dir), so multiple worktrees of the
+    same repo collapse to a single suggestion.
+    """
     try:
         raw = _recent_repos_path().read_text(encoding="utf-8")
     except OSError:
@@ -65,6 +88,7 @@ def _read_recent_repos() -> list[Path]:
     if not isinstance(data, list):
         return []
     out: list[Path] = []
+    seen: set[str] = set()
     for entry in data:
         if isinstance(entry, dict):
             path_str = entry.get("path")
@@ -81,6 +105,10 @@ def _read_recent_repos() -> list[Path]:
         # messages is just noise.
         if not (candidate / ".git").exists():
             continue
+        key = _identity_key(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
         out.append(candidate)
     return out
 
@@ -94,7 +122,10 @@ def _record_recent_repo(repo_root: Path) -> None:
         path = _recent_repos_path()
         existing = _read_recent_repos()
         # Move-to-front semantics — most recently resolved wins the top slot.
-        deduped = [p for p in existing if p != repo_root]
+        # Dedupe by identity so a different worktree of the same repo replaces
+        # (rather than duplicates) the prior entry.
+        new_key = _identity_key(repo_root)
+        deduped = [p for p in existing if _identity_key(p) != new_key]
         merged = [repo_root, *deduped][:_RECENT_REPOS_LIMIT]
         from time import time as _now
 
@@ -408,11 +439,24 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
         fn.__doc__ = f"{summary}\n\n{_REPO_ROOT_DOC}"
         return server.tool()(fn)
 
-    def bundle(task: str, repo_root: str | None = None) -> dict[str, object]:
+    def bundle(
+        task: str, repo_root: str | None = None, include_advisory: bool = False
+    ) -> dict[str, object]:
         root = _resolve(repo_root)
-        result = _run_op("bundle", task, root, lambda: op_bundle(task, repo_root=root))
+        result = _run_op(
+            "bundle", task, root,
+            lambda: op_bundle(task, repo_root=root, include_advisory=include_advisory),
+        )
         return attach_consent_metadata(result, root)
-    _register("Build the v2 ground-truth bundle for a task.", bundle)
+    _register(
+        "Build the v2 ground-truth bundle for a task. The result carries "
+        "top-level `warnings` and a `retrieval` block: if `retrieval.ranker` is "
+        "`lexical`/`index_status` isn't `ok`, embedding retrieval is degraded "
+        "(see `warnings` for the fix) — do not trust ranking as semantic. Set "
+        "`include_advisory=true` to also attach in-flight-branch hits under a "
+        "separate `advisory` key (never mixed into `relevant_code`/`authority`).",
+        bundle,
+    )
 
     def authority(
         task: str, include: str = "summary", repo_root: str | None = None
@@ -626,11 +670,11 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
         top_k: int = 10,
         kind: str | None = None,
         repo_root: str | None = None,
-    ) -> list[dict[str, object]] | dict[str, object]:
+    ) -> dict[str, object]:
         from repoctx.ops import op_semantic_search
 
         root = _resolve(repo_root)
-        hits = _run_op(
+        result = _run_op(
             "semantic_search",
             query,
             root,
@@ -638,24 +682,53 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
                 query, repo_root=root, top_k=top_k, kind=kind,
             ),
         )
-        # Cold-start path: when the index is missing AND the user hasn't been
-        # asked yet, attach_consent_metadata wraps the list as
-        # `{"results": [...], "index_consent_prompt": {...}}`. Steady state
-        # (indexed repo, or post-answer) returns the historical list shape.
-        return attach_consent_metadata(hits, root)
+        # On the cold-start call against an unindexed repo (status="no_index"),
+        # attach_consent_metadata adds the one-shot `index_consent_prompt` so
+        # the agent can ask the user whether to build the index. Subsequent
+        # calls — and any call where consent is already recorded — pass the
+        # envelope through unchanged (modulo a quiet `index_consent: "declined"`
+        # hint if the user previously declined).
+        return attach_consent_metadata(result, root)
     _register(
         "Top-K most similar chunks for a query against the embedding index. "
-        "Returns raw per-chunk hits (path, score, snippet, line range, "
-        "enclosing_symbol) sorted by descending cosine similarity. "
-        "`kind` optionally filters to one of code/doc/test/config. Returns "
-        "an empty list if the index hasn't been built (`repoctx index`). "
-        "On the FIRST call against an unindexed repo, the response is "
-        "wrapped as `{\"results\": [...], \"index_consent_prompt\": {...}}` "
-        "to ask the user (once) whether to build the index — relay the "
-        "prompt verbatim and call the `index` tool with their answer. "
-        "Use this for direct similarity lookups; for task-shaped retrieval "
-        "prefer `bundle` or `get_task_context`.",
+        "Returns an envelope {status, message, repo, index_location, results}: "
+        "`results` is the per-chunk hits (path, score, snippet, line range, "
+        "enclosing_symbol) sorted by descending cosine similarity; `status` is "
+        "`ok` when embedding search ran, else `no_index`/`deps_missing`/"
+        "`schema_mismatch`/`error` with a `message` saying how to fix it (e.g. "
+        "run `repoctx index`). A status other than `ok` means retrieval is "
+        "DARK — do not treat an empty `results` as 'no matches'. `kind` "
+        "optionally filters to code/doc/test/config. On the FIRST call against "
+        "an unindexed repo the envelope also carries `index_consent_prompt` "
+        "asking the user (once) whether to build the index — relay the prompt "
+        "verbatim and call the `index` tool with their answer. For task-shaped "
+        "retrieval prefer `bundle`.",
         semantic_search,
+    )
+
+    def advisory_search(
+        query: str,
+        top_k: int = 10,
+        repo_root: str | None = None,
+    ) -> dict[str, object]:
+        from repoctx.advisory import op_advisory_search
+
+        root = _resolve(repo_root)
+        return _run_op(
+            "advisory_search",
+            query,
+            root,
+            lambda: op_advisory_search(query, repo_root=root, top_k=top_k),
+        )
+    _register(
+        "Search the ADVISORY lane: committed work on branches ahead of "
+        "origin/main (in-flight, not landed). Use to check whether something "
+        "is already being built elsewhere or where the architecture is heading. "
+        "Returns hits tagged with provenance (branch, commits_ahead, "
+        "last_commit_date, merge_status). These are STRICTLY LOWER AUTHORITY "
+        "than `bundle`/`semantic_search` — never treat them as ground truth. "
+        "Opt-in: returns status `no_index` until you run `repoctx advisory-index`.",
+        advisory_search,
     )
 
     def mark_used(
@@ -683,6 +756,64 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
         "is on the bundle response.",
         mark_used,
     )
+
+    @server.tool()
+    def reporting(
+        action: str = "status",
+        limit: int = 10,
+        purge: bool = False,
+    ) -> dict[str, object]:
+        """Inspect or toggle anonymous usage reporting for this install.
+
+        Reporting uploads counts/timings/error-classes (never paths, queries,
+        or code) so the maintainer can tune retrieval. Stable builds default
+        to OFF — the user (or you, on their behalf) must explicitly enable
+        it. Canary builds default to ON with a one-time disclosure.
+
+        action:
+          - "status": current channel, enabled state, install_id, queue size.
+          - "on": enable reporting.
+          - "off": disable reporting. Pass purge=True to also drop queued events.
+          - "show": return the up-to `limit` most-recently queued events that
+            would be uploaded. Use this to show the user exactly what's sent.
+          - "flush": attempt to upload the queue now.
+
+        This tool affects only the local install — it does NOT depend on a
+        repo_root and does NOT touch any repo files.
+        """
+        from repoctx import reporting as reporting_module
+
+        if action == "status":
+            return reporting_module.get_status()
+        if action == "on":
+            reporting_module.set_enabled(True)
+            return {"ok": True, **reporting_module.get_status()}
+        if action == "off":
+            reporting_module.set_enabled(False)
+            purged_bytes = reporting_module.purge_queue() if purge else 0
+            return {
+                "ok": True,
+                "purged_bytes": purged_bytes,
+                **reporting_module.get_status(),
+            }
+        if action == "show":
+            return {
+                "events": reporting_module.get_queued_events(limit=limit),
+                **reporting_module.get_status(),
+            }
+        if action == "flush":
+            result = reporting_module.flush()
+            return {
+                "sent": result.sent,
+                "accepted": result.accepted,
+                "rejected": result.rejected,
+                "error": result.error,
+                **reporting_module.get_status(),
+            }
+        return {
+            "ok": False,
+            "error": f"unknown action: {action!r}; expected status|on|off|show|flush",
+        }
 
     return server
 
@@ -717,6 +848,16 @@ def main() -> None:
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
+
+    # No-op on stable; prints a one-time stderr disclosure on canary builds.
+    # Goes to stderr, not stdout, so it can't corrupt MCP stdio framing.
+    try:
+        from repoctx import reporting
+
+        reporting.maybe_show_canary_notice()
+    except Exception:  # noqa: BLE001 — disclosure must never break server boot
+        pass
+
     create_server(repo_root=args.repo).run()
 
 

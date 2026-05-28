@@ -12,12 +12,14 @@ import logging
 import os
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from time import perf_counter
 from typing import TYPE_CHECKING, Iterator
 
 from repoctx.chunker import Chunk, ChunkConfig, chunk_record
 from repoctx.config import DEFAULT_EMBEDDING_CONFIG, EmbeddingConfig
+from repoctx.index_location import resolve_embeddings_dir, shared_embeddings_dir
 from repoctx.models import FileRecord
 from repoctx.symbols import extract_symbols
 
@@ -325,30 +327,155 @@ class EmbeddingRetriever:
         return self.index.similarity_scores(query_vec)
 
 
+# Retrieval-status codes. ``ok`` means embedding-backed ranking is live; every
+# other value means retrieval silently degrades to lexical unless the caller
+# surfaces it — which is exactly the failure the worktree bug exposed. Callers
+# MUST report anything other than ``ok`` to the user.
+STATUS_OK = "ok"
+STATUS_DEPS_MISSING = "deps_missing"
+STATUS_NO_INDEX = "no_index"
+STATUS_SCHEMA_MISMATCH = "schema_mismatch"
+STATUS_ERROR = "error"
+
+
+@dataclass(frozen=True)
+class RetrieverStatus:
+    """Result of attempting to load the embedding retriever.
+
+    ``retriever`` is non-None iff ``status == STATUS_OK``. ``message`` is a
+    caller-facing, actionable sentence; ``index_dir`` is the canonical
+    (shared) location the index is expected at.
+    """
+
+    retriever: "EmbeddingRetriever | None"
+    status: str
+    message: str
+    index_dir: str
+
+    @property
+    def ok(self) -> bool:
+        return self.status == STATUS_OK
+
+
+def load_retriever_status(
+    repo_root: str | Path,
+    config: EmbeddingConfig = DEFAULT_EMBEDDING_CONFIG,
+) -> RetrieverStatus:
+    """Load model + persisted index, reporting *why* it failed when it does.
+
+    Unlike :func:`try_load_retriever` (which collapses every failure to
+    ``None``), this distinguishes "deps missing", "no index built", "index
+    outdated", and "unexpected error" so the MCP layer can tell the agent the
+    truth instead of silently returning lexical results.
+    """
+    canonical = str(shared_embeddings_dir(repo_root, config))
+    repo = str(Path(repo_root).resolve())
+    if not HAS_EMBEDDINGS:
+        return RetrieverStatus(
+            None,
+            STATUS_DEPS_MISSING,
+            "Embedding dependencies are not installed, so retrieval is "
+            "lexical-only. Install with: pip install 'repoctx-mcp[embeddings]'.",
+            canonical,
+        )
+    try:
+        from repoctx.vector_index import IndexSchemaMismatch, VectorIndex
+
+        index_dir = resolve_embeddings_dir(repo_root, config)
+        try:
+            index = VectorIndex.load(index_dir)
+        except FileNotFoundError:
+            return RetrieverStatus(
+                None,
+                STATUS_NO_INDEX,
+                f"No embedding index for {repo}; retrieval is lexical-only. "
+                f"Build the shared index with `repoctx index` (it lives at "
+                f"{canonical} and is reused by every worktree of this repo).",
+                canonical,
+            )
+        except IndexSchemaMismatch as exc:
+            logger.warning("Embedding index outdated, falling back to heuristics:\n%s", exc)
+            return RetrieverStatus(
+                None,
+                STATUS_SCHEMA_MISMATCH,
+                f"Embedding index for {repo} is from an older repoctx "
+                f"(schema changed); retrieval is lexical-only until you run "
+                f"`repoctx rebuild`.",
+                canonical,
+            )
+        model = EmbeddingModel(config)
+        return RetrieverStatus(
+            EmbeddingRetriever(model=model, index=index), STATUS_OK, "", canonical,
+        )
+    except Exception as exc:  # noqa: BLE001 — never let retrieval load crash a call
+        logger.info("Embeddings not available: %s", exc)
+        return RetrieverStatus(
+            None,
+            STATUS_ERROR,
+            f"Embedding retrieval is unavailable ({type(exc).__name__}); "
+            f"falling back to lexical ranking.",
+            canonical,
+        )
+
+
+def probe_index_status(
+    repo_root: str | Path,
+    config: EmbeddingConfig = DEFAULT_EMBEDDING_CONFIG,
+) -> RetrieverStatus:
+    """Cheap status check — file stats only, no numpy/model load.
+
+    Use this when you need to *report* whether embedding retrieval is live
+    (e.g. to attach a bundle warning) but don't need the scores. Returns the
+    same status codes as :func:`load_retriever_status`; ``retriever`` is always
+    ``None`` (``ok`` here means "an index is present and schema-current").
+    """
+    import json as _j
+
+    canonical = str(shared_embeddings_dir(repo_root, config))
+    repo = str(Path(repo_root).resolve())
+    if not HAS_EMBEDDINGS:
+        return RetrieverStatus(
+            None, STATUS_DEPS_MISSING,
+            "Embedding dependencies are not installed, so retrieval is "
+            "lexical-only. Install with: pip install 'repoctx-mcp[embeddings]'.",
+            canonical,
+        )
+    index_dir = resolve_embeddings_dir(repo_root, config)
+    if not (index_dir / "vectors.npy").exists():
+        return RetrieverStatus(
+            None, STATUS_NO_INDEX,
+            f"No embedding index for {repo}; retrieval is lexical-only. "
+            f"Build the shared index with `repoctx index` (it lives at "
+            f"{canonical} and is reused by every worktree of this repo).",
+            canonical,
+        )
+    from repoctx.vector_index import SCHEMA_VERSION
+
+    try:
+        ver = _j.loads((index_dir / "index_config.json").read_text(encoding="utf-8")).get(
+            "schema_version", 1
+        )
+    except (OSError, ValueError):
+        ver = 1
+    if ver != SCHEMA_VERSION:
+        return RetrieverStatus(
+            None, STATUS_SCHEMA_MISMATCH,
+            f"Embedding index for {repo} is from an older repoctx (schema "
+            f"changed); retrieval is lexical-only until you run `repoctx rebuild`.",
+            canonical,
+        )
+    return RetrieverStatus(None, STATUS_OK, "", canonical)
+
+
 def try_load_retriever(
     repo_root: str | Path,
     config: EmbeddingConfig = DEFAULT_EMBEDDING_CONFIG,
 ) -> EmbeddingRetriever | None:
-    """Attempt to load model + persisted index. Returns None on any failure."""
-    if not HAS_EMBEDDINGS:
-        logger.debug("Embedding dependencies not installed – skipping")
-        return None
-    try:
-        from repoctx.vector_index import IndexSchemaMismatch, VectorIndex
+    """Attempt to load model + persisted index. Returns None on any failure.
 
-        index_dir = Path(repo_root).resolve() / config.index_dir / "embeddings"
-        try:
-            index = VectorIndex.load(index_dir)
-        except IndexSchemaMismatch as exc:
-            # Surface the migration instructions at WARNING level so users see
-            # them without --verbose; falling back to heuristic-only retrieval.
-            logger.warning("Embedding index outdated, falling back to heuristics:\n%s", exc)
-            return None
-        model = EmbeddingModel(config)
-        return EmbeddingRetriever(model=model, index=index)
-    except Exception as exc:
-        logger.info("Embeddings not available: %s", exc)
-        return None
+    Thin back-compat wrapper over :func:`load_retriever_status`.
+    """
+    return load_retriever_status(repo_root, config).retriever
 
 
 def _chunks_for_record(
@@ -400,7 +527,7 @@ def _load_compatible_existing_index(
     """
     from repoctx.vector_index import IndexSchemaMismatch, VectorIndex
 
-    index_dir = root / config.index_dir / "embeddings"
+    index_dir = resolve_embeddings_dir(root, config)
     try:
         existing = VectorIndex.load(index_dir)
     except FileNotFoundError as exc:
@@ -437,8 +564,17 @@ def build_index(
     config: EmbeddingConfig = DEFAULT_EMBEDDING_CONFIG,
     chunk_config: ChunkConfig | None = None,
     incremental: bool = False,
+    source: str = "origin-main",
 ) -> VectorIndex:
     """Scan a repository, chunk every file, embed each chunk, and return a VectorIndex.
+
+    ``source`` selects what gets indexed:
+
+    - ``"origin-main"`` (default): the tree at the resolved base ref
+      (``origin/main`` and fallbacks), read from git objects — independent of
+      the checked-out branch, so the index is the ground truth of *landed*
+      work. Falls back to a worktree scan if no base ref resolves.
+    - ``"worktree"``: the current working tree (legacy behavior).
 
     Each file produces one or more chunks (symbol-aware sliding window for code,
     paragraph-aware for prose). Caller persists with ``index.save(…)``.
@@ -450,7 +586,6 @@ def build_index(
     missing, schema-incompatible, or built with a different model/chunker, we
     log a warning and fall back to a full rebuild.
     """
-    from repoctx.scanner import scan_repository
     from repoctx.vector_index import VectorIndex
 
     chunk_cfg = chunk_config or ChunkConfig()
@@ -460,7 +595,7 @@ def build_index(
     if incremental:
         existing = _load_compatible_existing_index(root, config, chunk_cfg)
 
-    repo_index = scan_repository(root)
+    repo_index, source_meta = _scan_for_source(root, source)
     records: list[FileRecord] = list(repo_index.records.values())
     entries_proto: list[tuple[FileRecord, Chunk]] = []
     skipped_empty = 0
@@ -473,12 +608,182 @@ def build_index(
             entries_proto.append((record, chunk))
 
     if existing is None:
-        return _full_build(
+        result = _full_build(
             entries_proto, config, chunk_cfg, len(records), skipped_empty,
         )
-    return _incremental_build(
-        existing, entries_proto, config, chunk_cfg,
-    )
+    else:
+        result = _incremental_build(existing, entries_proto, config, chunk_cfg)
+    result.source_meta = source_meta
+    return result
+
+
+def _scan_for_source(root: Path, source: str):
+    """Return ``(RepositoryIndex, source_meta)`` for the requested ``source``."""
+    from repoctx.scanner import scan_repository
+
+    if source == "origin-main":
+        from repoctx.git_tree import resolve_base_ref, scan_git_tree
+
+        resolved = resolve_base_ref(root)
+        if resolved is not None:
+            ref, sha = resolved
+            logger.info("Indexing from git objects at %s (%s)", ref, sha[:12])
+            meta = {
+                "built_from": "origin-main",
+                "base_ref": ref,
+                "base_sha": sha,
+                "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            return scan_git_tree(root, ref), meta
+        logger.warning(
+            "origin-main index requested but no base ref resolved (not a git "
+            "repo / no commits); falling back to a working-tree scan.",
+        )
+        return scan_repository(root), {
+            "built_from": "worktree",
+            "fallback_reason": "no_base_ref",
+            "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+    return scan_repository(root), {
+        "built_from": "worktree",
+        "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+
+def _safe_load_index(index_dir: Path):
+    from repoctx.vector_index import VectorIndex
+
+    try:
+        return VectorIndex.load(index_dir)
+    except Exception:  # noqa: BLE001 — missing/incompatible both mean "no usable base"
+        return None
+
+
+def _count_changed_files(repo_root: Path, sha_a: str | None, sha_b: str) -> int | None:
+    """Number of files differing between two commits, or None if undeterminable."""
+    if not sha_a:
+        return None
+    from repoctx.git_state import _run_git
+
+    out = _run_git(repo_root, "diff", "--name-only", f"{sha_a}..{sha_b}")
+    if out is None:
+        return None
+    return len([ln for ln in out.splitlines() if ln.strip()])
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def refresh_base_index(
+    repo_root: str | Path,
+    config: EmbeddingConfig = DEFAULT_EMBEDDING_CONFIG,
+    *,
+    force: bool = False,
+    fetch: bool = True,
+    embed: bool = True,
+    build_if_missing: bool = True,
+    ttl_seconds: int | None = None,
+    max_files: int | None = None,
+) -> dict:
+    """Keep the origin/main-pinned index current; return a status dict.
+
+    Status values: ``current`` (already at origin/main), ``refreshed``
+    (re-embedded the delta), ``built`` (built from scratch), ``stale`` /
+    ``stale_large`` (origin/main advanced but we only reported — ``embed`` off
+    or delta over the cap), ``no_base`` (no resolvable base ref),
+    ``no_index`` (nothing built and ``build_if_missing`` off), ``deps_missing``.
+
+    ``fetch`` runs a TTL-gated ``git fetch origin main`` first. ``embed`` False
+    turns this into a cheap drift *probe* (no re-embedding) for the read path.
+    """
+    if not HAS_EMBEDDINGS:
+        return {"status": "deps_missing"}
+    from repoctx.git_tree import maybe_fetch_origin_main, resolve_base_ref
+
+    root = Path(repo_root).resolve()
+    ttl = ttl_seconds if ttl_seconds is not None else config.base_fetch_ttl_seconds
+    if fetch:
+        maybe_fetch_origin_main(root, ttl, force=force)
+    resolved = resolve_base_ref(root)
+    if resolved is None:
+        return {"status": "no_base"}
+    ref, sha = resolved
+    index_dir = resolve_embeddings_dir(root, config)
+    existing = _safe_load_index(index_dir)
+
+    if existing is None:
+        if not build_if_missing or not embed:
+            return {"status": "no_index", "base_ref": ref, "base_sha": sha}
+        result = build_index(root, config=config, incremental=False, source="origin-main")
+        result.save(index_dir)
+        return {"status": "built", "base_ref": ref, "base_sha": sha}
+
+    meta = existing.source_meta or {}
+    indexed_sha = meta.get("base_sha")
+    if not force and meta.get("built_from") == "origin-main" and indexed_sha == sha:
+        return {"status": "current", "base_ref": ref, "base_sha": sha}
+
+    changed = _count_changed_files(root, indexed_sha, sha)
+    if not force and not embed:
+        return {
+            "status": "stale", "base_ref": ref, "base_sha": sha,
+            "indexed_sha": indexed_sha, "changed": changed,
+        }
+    cap = max_files if max_files is not None else config.base_refresh_max_files
+    if not force and changed is not None and changed > cap:
+        return {
+            "status": "stale_large", "base_ref": ref, "base_sha": sha,
+            "indexed_sha": indexed_sha, "changed": changed,
+        }
+    result = build_index(root, config=config, incremental=True, source="origin-main")
+    result.save(index_dir)
+    return {
+        "status": "refreshed", "base_ref": ref, "base_sha": sha,
+        "indexed_sha": indexed_sha, "changed": changed,
+    }
+
+
+def maybe_refresh_base_on_read(
+    repo_root: str | Path, config: EmbeddingConfig = DEFAULT_EMBEDDING_CONFIG
+) -> dict:
+    """Read-path hook: TTL-gated refresh of the origin/main base index.
+
+    Re-embeds the delta when ``base_refresh_on_read`` is enabled (default) and
+    the delta is small; otherwise just reports drift so the caller can warn.
+    Never builds from scratch on a read (that belongs to ``repoctx index``).
+    Best-effort: never raises.
+    """
+    try:
+        on_read = _env_bool("REPOCTX_BASE_REFRESH_ON_READ", config.base_refresh_on_read)
+        return refresh_base_index(
+            repo_root, config, fetch=True, force=False, embed=on_read, build_if_missing=False,
+        )
+    except Exception:  # noqa: BLE001 — refresh must never break a read
+        logger.debug("base refresh on read failed", exc_info=True)
+        return {"status": "error"}
+
+
+def base_staleness_warning(status: dict) -> str | None:
+    """Turn a refresh status dict into a caller-facing warning, or None."""
+    st = status.get("status")
+    if st in ("stale", "stale_large"):
+        changed = status.get("changed")
+        delta = f"{changed} file(s) " if changed is not None else ""
+        indexed = (status.get("indexed_sha") or "")[:12]
+        base = (status.get("base_sha") or "")[:12]
+        tail = (
+            " (delta too large for an on-read refresh)" if st == "stale_large" else ""
+        )
+        return (
+            f"origin/main has advanced {delta}past the indexed base "
+            f"({indexed}..{base}); landed work may be missing from retrieval{tail}. "
+            f"Run `repoctx index --refresh` to re-embed."
+        )
+    return None
 
 
 def _full_build(
@@ -600,7 +905,7 @@ def update_file_in_index(
 
     chunk_cfg = chunk_config or ChunkConfig()
     root = Path(repo_root).resolve()
-    index_dir = root / config.index_dir / "embeddings"
+    index_dir = resolve_embeddings_dir(root, config)
     vec_index = VectorIndex.load(index_dir)
     model = EmbeddingModel(config)
 
@@ -645,7 +950,9 @@ def update_file_in_index(
 
 
 def _embeddings_dir(repo_root: str | Path, config: EmbeddingConfig) -> Path:
-    return Path(repo_root).resolve() / config.index_dir / "embeddings"
+    # The pending-update queue lives alongside the index it mutates, so it
+    # follows the index to the shared (identity-keyed) location.
+    return resolve_embeddings_dir(repo_root, config)
 
 
 def _pending_path(repo_root: str | Path, config: EmbeddingConfig) -> Path:
