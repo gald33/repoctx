@@ -74,6 +74,15 @@ def main() -> None:
     refresh_after_cli_invocation()
     logging.basicConfig(level=logging.DEBUG if getattr(args, "verbose", False) else logging.WARNING)
 
+    # No-op on stable; prints a one-time stderr disclosure on canary builds
+    # (and only on the very first invocation per install).
+    try:
+        from repoctx import reporting
+
+        reporting.maybe_show_canary_notice()
+    except Exception:  # noqa: BLE001 — disclosure must never break the CLI
+        pass
+
     cmd = args.command or "query"
     handler = COMMAND_HANDLERS.get(cmd)
     if handler is None:

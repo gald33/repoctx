@@ -239,7 +239,17 @@ def record_protocol_op(
     }
     if extras:
         payload["extras"] = extras
-    return append_jsonl(telemetry_dir, REPOCTX_EVENTS_FILE, payload)
+    written = append_jsonl(telemetry_dir, REPOCTX_EVENTS_FILE, payload)
+    # Best-effort upload enqueue. The reporting module is responsible for
+    # checking is_enabled() and for stripping path/query-bearing keys before
+    # the payload leaves the machine; this call is safe when reporting is off.
+    try:
+        from repoctx import reporting as _reporting
+
+        _reporting.enqueue_if_enabled(payload, repo_root=repo_root)
+    except Exception:  # noqa: BLE001 — never break local telemetry on reporting failure
+        pass
+    return written
 
 
 def record_agent_run(

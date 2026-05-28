@@ -7,6 +7,7 @@ This file is for **coding agents** (Cursor, Codex, Claude, etc.) working in this
 - **CLI:** `repoctx`, `repoctx query`, `repoctx index`, …
 - **MCP:** module `repoctx.mcp_server` — tool `get_task_context(task)`.
 - **Experiments:** `repoctx experiment` — resumable wizard; paired git worktrees (control vs treatment).
+- **Channels:** stable (default) and canary (`pip install --pre repoctx-mcp`). Stable installs are silent / no network unless the user opts in to reporting; canary defaults to reporting-on with a one-time disclosure.
 
 ## Experiments: what to tell the user
 
@@ -48,14 +49,40 @@ Full release flow:
 4. Commit (`chore(release): <x.y.z> — <one-line summary>`) and push to `main`.
 5. Tag the release commit locally: `git tag v<x.y.z>` (must match `project.version` exactly — the workflow's tag-vs-version check fails otherwise).
 6. Push the tag: `git push origin v<x.y.z>`. That push triggers the workflow.
+7. **Post-release: bump `project.version` to the next planned stable** (e.g. `1.7.0` after releasing `1.6.0`). Commit as `chore: bump pyproject to <next> for canary version ordering` and push to `main`. **Without this step canary builds become invisible to `pip install --pre`** — `pyproject.version` is what canary builds compute `<version>.devN` from, and PEP 440 puts `1.6.0.devN < 1.6.0`, so a canary based on the just-released stable version sorts below stable and `--pre` resolvers pick stable instead. Pick the next bump (patch / minor / major) based on what the next release is likely to be; canary lives in that gap.
 
 The workflow fires on `v*` tag push, verifies tag-vs-version, builds wheel + sdist, and publishes via OIDC. Typical run is ~40s. Verify with `gh run list --limit 1` or `curl -fsSL https://pypi.org/pypi/repoctx-mcp/json | jq -r .info.version`.
 
 If the verification step fails (tag doesn't match `project.version`), delete the broken tag (`git tag -d v<x.y.z>` and `git push --delete origin v<x.y.z>`), fix the mismatch, retag, push.
 
+### Canary releases
+
+Canary releases share the same workflow file but trigger via manual dispatch:
+
+```bash
+gh workflow run publish-pypi.yml -f channel=canary
+```
+
+The workflow then:
+
+1. Skips the tag-vs-version check (canary versions are CI-computed, not tagged in source).
+2. Runs `python scripts/release.py --channel canary --prepare-only --skip-clean-check`, which rewrites `repoctx/_build_channel.py` (`CHANNEL = "canary"`, `BUILD_ID` includes the short SHA) and bumps `pyproject.toml` to `<base>.dev<YYYYMMDDhhmmss>`.
+3. Builds wheel + sdist and publishes via the same OIDC trusted publisher.
+
+There is no need to bump `pyproject.toml` in source for canary — the workflow rewrites it ephemerally. Users get canary builds via `pip install --pre repoctx-mcp`.
+
+`scripts/release.py` can also be run locally for testing (with `--dry-run` or just for a local build), but **never with `--upload`** in normal use.
+
 ## Telemetry privacy
 
-Task strings and repo paths are **hashed** in default telemetry; do not assume plaintext queries are stored. See README **Telemetry** section.
+Two layers, distinct:
+
+- **Local telemetry** (`repoctx.telemetry`, writes to `~/.repoctx/telemetry/`) is on by default. Task strings and repo paths are **hashed**; do not assume plaintext queries are stored. Files never leave the machine.
+- **Anonymous reporting** (`repoctx.reporting`, uploads to a maintainer-run endpoint) is **off by default on stable** and **on by default on canary**. Stable users opt in explicitly via `repoctx reporting on`. Uploaded payloads strip all path/query/code-bearing fields and use a per-install random `install_id` and `repo_fingerprint = sha256(install_id || first_commit_sha)` so events aren't correlatable across users.
+
+When advising a user, default to recommending stable; surface reporting only if they want to help with retrieval tuning. If they ask "what does it send?", point them at `repoctx reporting show` and the README "Anonymous reporting" section.
+
+See README **Telemetry** and **Anonymous reporting** sections for the user-facing summary.
 
 ## Ground truth (repoctx)
 

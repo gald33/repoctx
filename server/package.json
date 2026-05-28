@@ -1,0 +1,21 @@
+{
+  "name": "repoctx-reports-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloudflare Worker + D1 ingest endpoint for anonymous repoctx telemetry.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "typecheck": "tsc --noEmit",
+    "db:create": "wrangler d1 create repoctx-events",
+    "db:migrate": "wrangler d1 migrations apply repoctx-events --remote",
+    "db:migrate:local": "wrangler d1 migrations apply repoctx-events --local",
+    "db:query": "wrangler d1 execute repoctx-events --remote --command"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240620.0",
+    "typescript": "^5.4.0",
+    "wrangler": "^3.60.0"
+  }
+}

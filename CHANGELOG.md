@@ -6,6 +6,40 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added — anonymous reporting + canary release channel
+
+Optional opt-in upload layer (`repoctx.reporting`) on top of the existing
+local telemetry. Stable installs default OFF with no prompts ever; canary
+installs default ON with a one-time stderr disclosure. Designed so a stable
+install that never opts in produces zero files on disk.
+
+- **Privacy contract.** Uploaded payloads carry counts, timings, and error
+  *classes* only — never paths, queries, code, error messages, git remote
+  URLs, hostnames, or anything correlatable across users. Repo identity is
+  `sha256(install_id || first_commit_sha)` so it's stable per (install,
+  repo) but not joinable across users. Server-side forbidden-key
+  enforcement provides defense in depth.
+
+- **Surface.** CLI `repoctx reporting {status,on,off,show,flush}`; MCP
+  `reporting` tool with the same actions so an agent can inspect or flip
+  the flag on the user's behalf; `REPOCTX_REPORTING=off` env kill switch.
+
+- **Canary channel.** Pre-release wheels published via
+  `pip install --pre repoctx-mcp`. `repoctx/_build_channel.py` carries the
+  baked-in `CHANNEL` and `BUILD_ID`; the release pipeline rewrites it for
+  canary builds. No auto-update — users upgrade when they choose.
+
+- **CI integration.** Existing OIDC-based PyPI workflow extended with a
+  `workflow_dispatch` channel input; canary path runs
+  `scripts/release.py --channel canary --prepare-only` before
+  `python -m build`. Trigger with
+  `gh workflow run publish-pypi.yml -f channel=canary`.
+
+- **Ingest endpoint.** Cloudflare Worker + D1 at
+  `https://repoctx-reports.repoctx.workers.dev` (`server/`). Worker rejects
+  events containing any forbidden top-level key independently from the
+  client.
+
 ## [1.5.1] — 2026-05-21
 
 ### Added
