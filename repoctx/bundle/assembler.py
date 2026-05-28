@@ -38,6 +38,7 @@ def build_bundle(
     max_authority_records: int = 12,
     max_code_refs: int = 10,
     embedding_scores: dict[str, float] | None = None,
+    index_status: Any | None = None,
 ) -> GroundTruthBundle:
     """Assemble a ground-truth bundle for ``task``.
 
@@ -45,6 +46,11 @@ def build_bundle(
     ``<repo_root>/.repoctx/config.json`` (falling back to defaults if absent).
     Callers wanting to bypass that — e.g., tests pinning to a known config —
     can pass ``DEFAULT_CONFIG`` explicitly.
+
+    ``index_status`` (a ``RetrieverStatus``) lets the caller report exactly why
+    embeddings are/aren't active. When omitted and no ``embedding_scores`` are
+    injected, a cheap model-free probe runs so the bundle still tells the agent
+    when retrieval has silently degraded to lexical.
     """
     started = perf_counter()
     repo_path = Path(repo_root).resolve()
@@ -97,13 +103,15 @@ def build_bundle(
         validation_plan=validation_plan, edit_scope=edit_scope, constraints=constraints
     )
     bundle.uncertainty_rule = uncertainty_rule(constraints)
+    ranker = "embeddings" if embedding_scores else "lexical"
     bundle.metrics = {
         "authority_records": len(authority_records),
         "constraints": len(constraints),
         "relevant_code": len(relevant_code),
         "build_duration_ms": int((perf_counter() - started) * 1000),
-        "ranker": "embeddings" if embedding_scores else "lexical",
+        "ranker": ranker,
     }
+    _attach_retrieval_provenance(bundle, repo_path, ranker, embedding_scores, index_status)
     scope_paths = list(edit_scope.allowed_paths) + list(edit_scope.related_paths) + list(edit_scope.protected_paths)
     bundle.staleness = collect_state(repo_path, scope_paths=scope_paths)
     _emit_bundle_event(repo_path, bundle, context_relevant_files=context.relevant_files,
@@ -162,6 +170,47 @@ def _ranked_path_event_entry(rp: RankedPath) -> dict[str, Any]:
 
 
 # ---- internals --------------------------------------------------------------------
+
+
+def _attach_retrieval_provenance(
+    bundle: GroundTruthBundle,
+    repo_path: Path,
+    ranker: str,
+    embedding_scores: dict[str, float] | None,
+    index_status: Any | None,
+) -> None:
+    """Populate ``bundle.retrieval`` and, when degraded, ``bundle.warnings``.
+
+    The whole point: a bundle that fell back to lexical because no embedding
+    index exists must say so at the top level, not bury ``ranker: "lexical"``
+    in ``metrics`` where nobody looks (the original silent-degradation bug).
+    """
+    status = index_status
+    if status is None and embedding_scores is None:
+        try:
+            from repoctx.embeddings import probe_index_status
+
+            status = probe_index_status(repo_path)
+        except Exception:  # noqa: BLE001 — provenance must never break bundling
+            status = None
+
+    if embedding_scores:
+        index_status_code = "ok"
+    elif status is not None:
+        index_status_code = status.status
+    else:
+        index_status_code = "unknown"
+
+    bundle.retrieval = {
+        "ranker": ranker,
+        "embeddings_active": bool(embedding_scores),
+        "index_status": index_status_code,
+        "index_location": getattr(status, "index_dir", "") if status is not None else "",
+    }
+    # Warn only when retrieval is genuinely degraded (no usable index), not
+    # merely when a light op chose lexical while an index exists.
+    if not embedding_scores and status is not None and not status.ok:
+        bundle.warnings.append(status.message)
 
 
 def _rank_authority(records: list[AuthorityRecord], task: str) -> list[AuthorityRecord]:

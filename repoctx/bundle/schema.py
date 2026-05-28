@@ -99,6 +99,12 @@ class GroundTruthBundle:
     uncertainty_rule: str = ""
     metrics: dict[str, Any] = field(default_factory=dict)
     staleness: dict[str, Any] = field(default_factory=dict)
+    # Caller-visible, top-level warnings (e.g. "retrieval fell back to
+    # lexical because no embedding index exists"). Surfaced prominently so a
+    # degraded bundle is never mistaken for a healthy one.
+    warnings: list[str] = field(default_factory=list)
+    # Retrieval provenance: which ranker actually ran and the index's status.
+    retrieval: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self, *, include_full_text: bool = False) -> dict[str, Any]:
         def _auth_to_dict(r: AuthorityRecord) -> dict[str, Any]:
@@ -117,6 +123,8 @@ class GroundTruthBundle:
         return {
             "schema_version": BUNDLE_SCHEMA_VERSION,
             "id": self.id,
+            "warnings": list(self.warnings),
+            "retrieval": dict(self.retrieval),
             "task": {"summary": self.task_summary, "raw": self.task_raw},
             "authority": {
                 "records": [_auth_to_dict(r) for r in self.authoritative_records],

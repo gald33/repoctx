@@ -32,6 +32,10 @@ When the control lane is active, RepoCtx may **stub** `get_task_context` (empty 
 - Experiment wizard + handoff: `repoctx/main.py` (experiment helpers), `repoctx/experiment.py`, `repoctx/telemetry.py` (active session + experiment JSONL)
 - Suppression logic: `repoctx/experiment_mcp.py`
 - MCP tool: `repoctx/mcp_server.py`
+- Index location (identity-keyed, worktree-shared) + migration: `repoctx/index_location.py`
+- origin/main-pinned scan from git objects: `repoctx/git_tree.py`; base refresh/TTL + retrieval status live in `repoctx/embeddings.py`
+- Worktree overlay (your delta on the base): `repoctx/overlay.py`
+- Advisory lane (opt-in, in-flight branches): `repoctx/advisory.py`
 
 ## Releasing to PyPI
 
