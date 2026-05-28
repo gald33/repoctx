@@ -302,7 +302,7 @@ repoctx query "your task" --debug-scores   # show heuristic/embedding/final brea
 - `index`, `update`, `rebuild`
 - `install`, `install-claude-code`, `install-cursor`, `install-codex`
 - `init-authority`, `propose-authority`
-- `experiment`, `hook`, `stats`
+- `experiment`, `hook`, `stats`, `reporting`
 
 ---
 
@@ -335,7 +335,29 @@ Import-graph expansion works for Python (`import`, `from`) and JavaScript/TypeSc
 
 ### Telemetry
 
-RepoCtx writes local JSONL telemetry to `~/.repoctx/telemetry/` by default. Task text and repo identifiers are hashed before storage. Set `REPOCTX_TELEMETRY_DIR` to change the location.
+RepoCtx writes local JSONL telemetry to `~/.repoctx/telemetry/` by default. Task text and repo identifiers are hashed before storage. Set `REPOCTX_TELEMETRY_DIR` to change the location. **Local telemetry never leaves your machine** unless you opt in to reporting (see below).
+
+### Anonymous reporting (opt-in on stable, default-on on canary)
+
+To help tune retrieval, RepoCtx can upload a *redacted* subset of telemetry events (counts, timings, error classes — see below) to a maintainer-run ingest endpoint. The privacy contract:
+
+- **Stable builds (`pip install repoctx-mcp`): OFF by default.** No prompt, ever. You opt in explicitly with `repoctx reporting on`.
+- **Canary builds (`pip install --pre repoctx-mcp`): ON by default**, with a one-time disclosure printed to stderr on first run.
+- **Kill switch:** `REPOCTX_REPORTING=off` overrides everything.
+- **What's sent:** `op`, `success`, `duration_ms`, `output_bytes`, `error_type` (class only, never the message), per-op `stats` (e.g. files considered/selected), plus an anonymous `install_id` (random UUID), the channel tag, and a `repo_fingerprint = sha256(install_id || first_commit_sha)` that's stable per (install, repo) but not correlatable across users.
+- **What's never sent:** paths, query/task text, code, error messages, git remote URLs, hostnames, usernames. The ingest endpoint enforces this independently and rejects events containing any forbidden key.
+
+Inspect or toggle anytime:
+
+```bash
+repoctx reporting status        # show current state, channel, install_id, queue size
+repoctx reporting on            # enable
+repoctx reporting off [--purge] # disable; --purge also drops any pending queue
+repoctx reporting show          # print queued events that would be uploaded
+repoctx reporting flush         # attempt upload now
+```
+
+The MCP server exposes the same toggle as a `reporting` tool, so an agent collaborating with you can inspect or flip the flag on your behalf.
 
 ---
 

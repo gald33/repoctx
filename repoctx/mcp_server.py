@@ -613,6 +613,64 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
         mark_used,
     )
 
+    @server.tool()
+    def reporting(
+        action: str = "status",
+        limit: int = 10,
+        purge: bool = False,
+    ) -> dict[str, object]:
+        """Inspect or toggle anonymous usage reporting for this install.
+
+        Reporting uploads counts/timings/error-classes (never paths, queries,
+        or code) so the maintainer can tune retrieval. Stable builds default
+        to OFF — the user (or you, on their behalf) must explicitly enable
+        it. Canary builds default to ON with a one-time disclosure.
+
+        action:
+          - "status": current channel, enabled state, install_id, queue size.
+          - "on": enable reporting.
+          - "off": disable reporting. Pass purge=True to also drop queued events.
+          - "show": return the up-to `limit` most-recently queued events that
+            would be uploaded. Use this to show the user exactly what's sent.
+          - "flush": attempt to upload the queue now.
+
+        This tool affects only the local install — it does NOT depend on a
+        repo_root and does NOT touch any repo files.
+        """
+        from repoctx import reporting as reporting_module
+
+        if action == "status":
+            return reporting_module.get_status()
+        if action == "on":
+            reporting_module.set_enabled(True)
+            return {"ok": True, **reporting_module.get_status()}
+        if action == "off":
+            reporting_module.set_enabled(False)
+            purged_bytes = reporting_module.purge_queue() if purge else 0
+            return {
+                "ok": True,
+                "purged_bytes": purged_bytes,
+                **reporting_module.get_status(),
+            }
+        if action == "show":
+            return {
+                "events": reporting_module.get_queued_events(limit=limit),
+                **reporting_module.get_status(),
+            }
+        if action == "flush":
+            result = reporting_module.flush()
+            return {
+                "sent": result.sent,
+                "accepted": result.accepted,
+                "rejected": result.rejected,
+                "error": result.error,
+                **reporting_module.get_status(),
+            }
+        return {
+            "ok": False,
+            "error": f"unknown action: {action!r}; expected status|on|off|show|flush",
+        }
+
     return server
 
 
@@ -646,6 +704,16 @@ def main() -> None:
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
+
+    # No-op on stable; prints a one-time stderr disclosure on canary builds.
+    # Goes to stderr, not stdout, so it can't corrupt MCP stdio framing.
+    try:
+        from repoctx import reporting
+
+        reporting.maybe_show_canary_notice()
+    except Exception:  # noqa: BLE001 — disclosure must never break server boot
+        pass
+
     create_server(repo_root=args.repo).run()
 
 
