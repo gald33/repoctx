@@ -7,6 +7,7 @@ from time import perf_counter
 from uuid import uuid4
 
 from repoctx.experiment_mcp import mcp_suppression_should_short_circuit
+from repoctx.index_consent import attach_consent_metadata, set_consent
 from repoctx.models import ContextMetrics, ContextResponse
 from repoctx.retriever import get_task_context as repo_get_task_context
 from repoctx.telemetry import record_repoctx_invocation
@@ -366,7 +367,7 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
             error_type=None,
             duration_ms=int((perf_counter() - started) * 1000),
         )
-        return response.to_dict()
+        return attach_consent_metadata(response.to_dict(), repo_root)
 
     # ---- repoctx v2 protocol ops ------------------------------------------------
     # See docs/plans/2026-04-23-repoctx-v2-design.md § 4.
@@ -442,10 +443,11 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
         task: str, repo_root: str | None = None, include_advisory: bool = False
     ) -> dict[str, object]:
         root = _resolve(repo_root)
-        return _run_op(
+        result = _run_op(
             "bundle", task, root,
             lambda: op_bundle(task, repo_root=root, include_advisory=include_advisory),
         )
+        return attach_consent_metadata(result, root)
     _register(
         "Build the v2 ground-truth bundle for a task. The result carries "
         "top-level `warnings` and a `retrieval` block: if `retrieval.ranker` is "
@@ -469,7 +471,8 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
 
     def scope(task: str, repo_root: str | None = None) -> dict[str, object]:
         root = _resolve(repo_root)
-        return _run_op("scope", task, root, lambda: op_scope(task, repo_root=root))
+        result = _run_op("scope", task, root, lambda: op_scope(task, repo_root=root))
+        return attach_consent_metadata(result, root)
     _register("Compute the edit scope (allowed/protected paths) for a task.", scope)
 
     def validate_plan(
@@ -546,6 +549,65 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
         install,
     )
 
+    def index(
+        repo_root: str | None = None,
+        decline: bool = False,
+    ) -> dict[str, object]:
+        # The single explicit-consent surface for the embedding index. Either
+        # branch records the user's answer in <repo>/.repoctx/config.json so
+        # the one-shot consent prompt never re-appears.
+        root = _resolve(repo_root)
+        if decline:
+            try:
+                set_consent(root, "declined")
+            except Exception as exc:
+                return {
+                    "status": "error",
+                    "action": "decline",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            return {
+                "status": "declined",
+                "message": (
+                    "Recorded: this repo will not be prompted to index again. "
+                    "Retrieval will use lexical-only matching. Run `repoctx "
+                    "index` from the CLI, or call this tool without "
+                    "`decline=true`, to change your mind."
+                ),
+            }
+
+        from repoctx.harness import _maybe_build_index
+
+        def _build() -> dict[str, object]:
+            errors: dict[str, str] = {}
+            status = _maybe_build_index(root, True, errors)
+            if errors:
+                return {"status": "error", "errors": errors}
+            if status is None:
+                # _maybe_build_index returns None only via errors when
+                # build_index=True; this branch is defensive.
+                return {
+                    "status": "error",
+                    "errors": {"embedding_index": "build returned no status"},
+                }
+            try:
+                set_consent(root, "granted")
+            except Exception:
+                logger.warning("Failed to record granted index consent", exc_info=True)
+            # _maybe_build_index returns {"status": "built", "files": N, "index_dir": ...}
+            return status
+
+        return _run_op("index", "", root, _build)
+    _register(
+        "Build the embedding index for this repo (downloads the embedding "
+        "model on first use and scans every file — see the one-shot "
+        "`index_consent_prompt` for cost details). Records the user's "
+        "consent so the prompt won't re-appear. Call with `decline=true` "
+        "to record that the user does NOT want the index built; this "
+        "suppresses the prompt without performing any download or scan.",
+        index,
+    )
+
     def stats(
         days: int = 30,
         repo_root: str | None = None,
@@ -612,7 +674,7 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
         from repoctx.ops import op_semantic_search
 
         root = _resolve(repo_root)
-        return _run_op(
+        result = _run_op(
             "semantic_search",
             query,
             root,
@@ -620,6 +682,13 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
                 query, repo_root=root, top_k=top_k, kind=kind,
             ),
         )
+        # On the cold-start call against an unindexed repo (status="no_index"),
+        # attach_consent_metadata adds the one-shot `index_consent_prompt` so
+        # the agent can ask the user whether to build the index. Subsequent
+        # calls — and any call where consent is already recorded — pass the
+        # envelope through unchanged (modulo a quiet `index_consent: "declined"`
+        # hint if the user previously declined).
+        return attach_consent_metadata(result, root)
     _register(
         "Top-K most similar chunks for a query against the embedding index. "
         "Returns an envelope {status, message, repo, index_location, results}: "
@@ -629,8 +698,11 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
         "`schema_mismatch`/`error` with a `message` saying how to fix it (e.g. "
         "run `repoctx index`). A status other than `ok` means retrieval is "
         "DARK — do not treat an empty `results` as 'no matches'. `kind` "
-        "optionally filters to code/doc/test/config. For task-shaped retrieval "
-        "prefer `bundle`.",
+        "optionally filters to code/doc/test/config. On the FIRST call against "
+        "an unindexed repo the envelope also carries `index_consent_prompt` "
+        "asking the user (once) whether to build the index — relay the prompt "
+        "verbatim and call the `index` tool with their answer. For task-shaped "
+        "retrieval prefer `bundle`.",
         semantic_search,
     )
 
