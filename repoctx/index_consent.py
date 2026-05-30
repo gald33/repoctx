@@ -209,6 +209,32 @@ def _build_prompt_dict() -> dict[str, Any]:
     }
 
 
+def prompt_will_be_shown(repo_root: str | Path) -> bool:
+    """Predicate: would the next call to :func:`maybe_consent_prompt` attach a prompt?
+
+    Side-effect-free — lets callers (e.g. the MCP layer recording a
+    ``prompt_shown`` telemetry event) check the decision before
+    :func:`attach_consent_metadata` fires :func:`mark_prompt_shown`'s
+    disk-write side effect. Same conditions as :func:`maybe_consent_prompt`.
+
+    Returns False on any internal error rather than raising — telemetry must
+    never break a tool call.
+    """
+    try:
+        if not embeddings_available():
+            return False
+        if is_index_present(repo_root):
+            return False
+        if read_consent(repo_root) is not None:
+            return False
+        if was_prompt_shown(repo_root):
+            return False
+    except Exception:
+        logger.debug("prompt_will_be_shown check failed; assuming no", exc_info=True)
+        return False
+    return True
+
+
 def maybe_consent_prompt(repo_root: str | Path) -> dict[str, Any] | None:
     """Return a structured consent prompt iff we should ask the user, else None.
 
@@ -304,6 +330,7 @@ __all__ = [
     "is_index_present",
     "mark_prompt_shown",
     "maybe_consent_prompt",
+    "prompt_will_be_shown",
     "read_consent",
     "set_consent",
     "was_prompt_shown",

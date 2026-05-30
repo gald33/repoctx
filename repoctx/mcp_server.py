@@ -7,10 +7,18 @@ from time import perf_counter
 from uuid import uuid4
 
 from repoctx.experiment_mcp import mcp_suppression_should_short_circuit
-from repoctx.index_consent import attach_consent_metadata, set_consent
+from repoctx.index_consent import (
+    attach_consent_metadata,
+    prompt_will_be_shown,
+    read_consent,
+    set_consent,
+)
 from repoctx.models import ContextMetrics, ContextResponse
 from repoctx.retriever import get_task_context as repo_get_task_context
-from repoctx.telemetry import record_repoctx_invocation
+from repoctx.telemetry import (
+    record_index_consent_event,
+    record_repoctx_invocation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -367,7 +375,7 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
             error_type=None,
             duration_ms=int((perf_counter() - started) * 1000),
         )
-        return attach_consent_metadata(response.to_dict(), repo_root)
+        return _attach_consent(response.to_dict(), repo_root)
 
     # ---- repoctx v2 protocol ops ------------------------------------------------
     # See docs/plans/2026-04-23-repoctx-v2-design.md § 4.
@@ -439,6 +447,29 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
         fn.__doc__ = f"{summary}\n\n{_REPO_ROOT_DOC}"
         return server.tool()(fn)
 
+    def _attach_consent(payload, root: Path):
+        """Wrap a retrieval response with the consent prompt + record telemetry.
+
+        We check ``prompt_will_be_shown`` BEFORE :func:`attach_consent_metadata`
+        fires its disk-write side effect, so the recording matches reality
+        even though the disk marker is written immediately after. Telemetry
+        failures never break the underlying tool call.
+        """
+        will_show = prompt_will_be_shown(root)
+        wrapped = attach_consent_metadata(payload, root)
+        if will_show:
+            try:
+                record_index_consent_event(
+                    telemetry_dir=telemetry_dir,
+                    session_id=uuid4().hex,
+                    surface="mcp",
+                    action="prompt_shown",
+                    repo_root=root,
+                )
+            except Exception:
+                logger.debug("Failed to record prompt_shown telemetry", exc_info=True)
+        return wrapped
+
     def bundle(
         task: str, repo_root: str | None = None, include_advisory: bool = False
     ) -> dict[str, object]:
@@ -447,7 +478,7 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
             "bundle", task, root,
             lambda: op_bundle(task, repo_root=root, include_advisory=include_advisory),
         )
-        return attach_consent_metadata(result, root)
+        return _attach_consent(result, root)
     _register(
         "Build the v2 ground-truth bundle for a task. The result carries "
         "top-level `warnings` and a `retrieval` block: if `retrieval.ranker` is "
@@ -472,7 +503,7 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
     def scope(task: str, repo_root: str | None = None) -> dict[str, object]:
         root = _resolve(repo_root)
         result = _run_op("scope", task, root, lambda: op_scope(task, repo_root=root))
-        return attach_consent_metadata(result, root)
+        return _attach_consent(result, root)
     _register("Compute the edit scope (allowed/protected paths) for a task.", scope)
 
     def validate_plan(
@@ -557,6 +588,9 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
         # branch records the user's answer in <repo>/.repoctx/config.json so
         # the one-shot consent prompt never re-appears.
         root = _resolve(repo_root)
+        # Capture `previous_action` before any state flip so telemetry can
+        # distinguish "first answer" from "user changed their mind".
+        previous = read_consent(root)
         if decline:
             try:
                 set_consent(root, "declined")
@@ -566,6 +600,17 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
                     "action": "decline",
                     "error": f"{type(exc).__name__}: {exc}",
                 }
+            try:
+                record_index_consent_event(
+                    telemetry_dir=telemetry_dir,
+                    session_id=uuid4().hex,
+                    surface="mcp",
+                    action="declined",
+                    repo_root=root,
+                    previous_action=previous,
+                )
+            except Exception:
+                logger.debug("Failed to record declined telemetry", exc_info=True)
             return {
                 "status": "declined",
                 "message": (
@@ -579,6 +624,7 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
         from repoctx.harness import _maybe_build_index
 
         def _build() -> dict[str, object]:
+            build_started = perf_counter()
             errors: dict[str, str] = {}
             status = _maybe_build_index(root, True, errors)
             if errors:
@@ -594,6 +640,18 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
                 set_consent(root, "granted")
             except Exception:
                 logger.warning("Failed to record granted index consent", exc_info=True)
+            try:
+                record_index_consent_event(
+                    telemetry_dir=telemetry_dir,
+                    session_id=uuid4().hex,
+                    surface="mcp",
+                    action="granted",
+                    repo_root=root,
+                    previous_action=previous,
+                    duration_ms=int((perf_counter() - build_started) * 1000),
+                )
+            except Exception:
+                logger.debug("Failed to record granted telemetry", exc_info=True)
             # _maybe_build_index returns {"status": "built", "files": N, "index_dir": ...}
             return status
 
@@ -683,12 +741,12 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
             ),
         )
         # On the cold-start call against an unindexed repo (status="no_index"),
-        # attach_consent_metadata adds the one-shot `index_consent_prompt` so
-        # the agent can ask the user whether to build the index. Subsequent
-        # calls — and any call where consent is already recorded — pass the
-        # envelope through unchanged (modulo a quiet `index_consent: "declined"`
-        # hint if the user previously declined).
-        return attach_consent_metadata(result, root)
+        # _attach_consent adds the one-shot `index_consent_prompt` and records
+        # a `prompt_shown` telemetry event. Subsequent calls — and any call
+        # where consent is already recorded — pass the envelope through
+        # unchanged (modulo a quiet `index_consent: "declined"` hint if the
+        # user previously declined).
+        return _attach_consent(result, root)
     _register(
         "Top-K most similar chunks for a query against the embedding index. "
         "Returns an envelope {status, message, repo, index_location, results}: "

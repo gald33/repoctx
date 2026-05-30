@@ -309,3 +309,127 @@ def test_index_tool_records_granted_on_successful_build(tmp_repo: Path, monkeypa
     result = tool.fn()
     assert result["status"] == "built"
     assert read_consent(tmp_repo) == "granted"
+
+
+# --- telemetry wiring -------------------------------------------------------
+
+
+def _consent_events(telemetry_dir: Path) -> list[dict]:
+    """Return every `index_consent` event written under *telemetry_dir*.
+
+    Filters from the shared ``repoctx-events.jsonl`` file (where
+    ``record_protocol_op`` also writes), so callers don't see unrelated noise.
+    """
+    path = telemetry_dir / "repoctx-events.jsonl"
+    if not path.exists():
+        return []
+    events = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        event = json.loads(line)
+        if event.get("event_type") == "index_consent":
+            events.append(event)
+    return events
+
+
+def test_prompt_shown_telemetry_recorded_once(tmp_repo: Path) -> None:
+    """First retrieval call records `prompt_shown`; second call doesn't."""
+    telemetry_dir = tmp_repo / ".telemetry"
+    _write_file(tmp_repo / "AGENTS.md", "# Repo guidance\n")
+    with patch("repoctx.index_consent.embeddings_available", return_value=True):
+        server = create_server(repo_root=tmp_repo, telemetry_dir=telemetry_dir)
+        bundle_tool = _get_tool(server, "bundle")
+        bundle_tool.fn(task="retry")
+        bundle_tool.fn(task="retry")
+    events = _consent_events(telemetry_dir)
+    assert len(events) == 1
+    assert events[0]["action"] == "prompt_shown"
+    assert events[0]["surface"] == "mcp"
+    assert events[0]["previous_action"] is None
+    assert events[0]["duration_ms"] is None
+
+
+def test_prompt_shown_telemetry_not_recorded_when_index_present(tmp_repo: Path) -> None:
+    """Indexed repos don't prompt, so no telemetry event is recorded."""
+    telemetry_dir = tmp_repo / ".telemetry"
+    _seed_built_index(tmp_repo)
+    _write_file(tmp_repo / "AGENTS.md", "# Repo guidance\n")
+    with patch("repoctx.index_consent.embeddings_available", return_value=True):
+        server = create_server(repo_root=tmp_repo, telemetry_dir=telemetry_dir)
+        bundle_tool = _get_tool(server, "bundle")
+        bundle_tool.fn(task="retry")
+    assert _consent_events(telemetry_dir) == []
+
+
+def test_decline_telemetry_records_previous_action(tmp_repo: Path) -> None:
+    """A first-time decline records `previous_action: None`."""
+    telemetry_dir = tmp_repo / ".telemetry"
+    server = create_server(repo_root=tmp_repo, telemetry_dir=telemetry_dir)
+    tool = _get_tool(server, "index")
+    tool.fn(decline=True)
+    events = _consent_events(telemetry_dir)
+    assert len(events) == 1
+    assert events[0]["action"] == "declined"
+    assert events[0]["previous_action"] is None
+
+
+def test_granted_telemetry_includes_build_duration(
+    tmp_repo: Path, monkeypatch
+) -> None:
+    """A successful build records `granted` with a real `duration_ms`."""
+    telemetry_dir = tmp_repo / ".telemetry"
+    server = create_server(repo_root=tmp_repo, telemetry_dir=telemetry_dir)
+    tool = _get_tool(server, "index")
+
+    def fake_build(repo_root, build_index, errors):
+        return {"status": "built", "files": 0, "index_dir": str(tmp_repo / ".repoctx" / "embeddings")}
+
+    monkeypatch.setattr("repoctx.harness._maybe_build_index", fake_build)
+    tool.fn()
+    events = _consent_events(telemetry_dir)
+    assert len(events) == 1
+    assert events[0]["action"] == "granted"
+    assert events[0]["previous_action"] is None
+    assert isinstance(events[0]["duration_ms"], int)
+    assert events[0]["duration_ms"] >= 0
+
+
+def test_declined_then_granted_records_previous_action(
+    tmp_repo: Path, monkeypatch
+) -> None:
+    """A user who declined and then changed their mind: the `granted` event
+    carries `previous_action: "declined"` so we can measure mind-changes.
+    """
+    telemetry_dir = tmp_repo / ".telemetry"
+    server = create_server(repo_root=tmp_repo, telemetry_dir=telemetry_dir)
+    tool = _get_tool(server, "index")
+    tool.fn(decline=True)
+
+    def fake_build(repo_root, build_index, errors):
+        return {"status": "built", "files": 0, "index_dir": str(tmp_repo / ".repoctx" / "embeddings")}
+
+    monkeypatch.setattr("repoctx.harness._maybe_build_index", fake_build)
+    tool.fn()
+
+    events = _consent_events(telemetry_dir)
+    assert [e["action"] for e in events] == ["declined", "granted"]
+    assert events[0]["previous_action"] is None
+    assert events[1]["previous_action"] == "declined"
+
+
+def test_telemetry_failure_does_not_break_tool(tmp_repo: Path, monkeypatch) -> None:
+    """A broken telemetry layer must never break the user-facing tool call."""
+    telemetry_dir = tmp_repo / ".telemetry"
+    _write_file(tmp_repo / "AGENTS.md", "# Repo guidance\n")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("telemetry on fire")
+
+    monkeypatch.setattr("repoctx.mcp_server.record_index_consent_event", boom)
+    with patch("repoctx.index_consent.embeddings_available", return_value=True):
+        server = create_server(repo_root=tmp_repo, telemetry_dir=telemetry_dir)
+        bundle_tool = _get_tool(server, "bundle")
+        # Tool must succeed and still attach the consent prompt.
+        result = bundle_tool.fn(task="retry")
+    assert "index_consent_prompt" in result
