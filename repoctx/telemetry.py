@@ -252,6 +252,60 @@ def record_protocol_op(
     return written
 
 
+ConsentAction = Literal["prompt_shown", "granted", "declined"]
+
+
+def record_index_consent_event(
+    *,
+    telemetry_dir: str | Path | None = None,
+    session_id: str,
+    surface: Surface = DEFAULT_SURFACE,
+    action: ConsentAction,
+    repo_root: str | Path,
+    previous_action: ConsentAction | None = None,
+    duration_ms: int | None = None,
+) -> Path:
+    """Record one event in the index-consent lifecycle.
+
+    ``action`` is one of ``"prompt_shown"`` (the one-shot consent prompt was
+    attached to a retrieval response), ``"granted"`` (the MCP `index` tool ran
+    a build to completion), or ``"declined"`` (the MCP `index` tool was called
+    with ``decline=true``). The trio captures the full state machine; a stream
+    of these is enough to reconstruct prompt → answer conversion rates without
+    any path/query/code data ever being recorded.
+
+    ``previous_action`` lets us distinguish "answered for the first time" from
+    "changed their mind" (e.g. a previously-declined repo gets granted later);
+    it is the recorded ``index_consent`` value *before* this event flipped it,
+    or ``None`` when none was recorded yet. ``duration_ms`` is meaningful only
+    for ``"granted"`` — the wall-clock time the build took.
+
+    Like ``record_protocol_op``, this enqueues to the reporting layer when
+    enabled. The reporting payload-builder already strips path-bearing keys
+    and replaces ``repo_hash`` with an install-scoped fingerprint, so the
+    only consent-specific knowledge upload needs is the new event shape.
+    """
+    payload: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "event_type": "index_consent",
+        "event_time": utc_now_seconds(),
+        "session_id": session_id,
+        "surface": surface,
+        "action": action,
+        "repo_hash": sha256_hex(str(Path(repo_root).resolve())),
+        "previous_action": previous_action,
+        "duration_ms": duration_ms,
+    }
+    written = append_jsonl(telemetry_dir, REPOCTX_EVENTS_FILE, payload)
+    try:
+        from repoctx import reporting as _reporting
+
+        _reporting.enqueue_if_enabled(payload, repo_root=repo_root)
+    except Exception:  # noqa: BLE001 — never break local telemetry on reporting failure
+        pass
+    return written
+
+
 def record_agent_run(
     *,
     telemetry_dir: str | Path | None = None,

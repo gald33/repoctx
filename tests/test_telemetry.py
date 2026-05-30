@@ -9,6 +9,7 @@ from repoctx.telemetry import (
     record_agent_run,
     record_experiment_lane,
     record_experiment_session,
+    record_index_consent_event,
     record_repoctx_invocation,
     save_active_experiment,
 )
@@ -49,6 +50,60 @@ def test_record_repoctx_invocation_writes_jsonl(tmp_path: Path) -> None:
     assert "repo_root" not in payload
     assert payload["query_hash"] != "add retry jitter"
     assert payload["repo_hash"] != str(tmp_path)
+
+
+def test_record_index_consent_event_writes_jsonl(tmp_path: Path) -> None:
+    telemetry_dir = tmp_path / "telemetry"
+
+    record_index_consent_event(
+        telemetry_dir=telemetry_dir,
+        session_id="session-1",
+        surface="mcp",
+        action="prompt_shown",
+        repo_root=tmp_path,
+    )
+
+    event_path = telemetry_dir / "repoctx-events.jsonl"
+    payload = json.loads(event_path.read_text(encoding="utf-8").strip())
+    assert payload["event_type"] == "index_consent"
+    assert payload["schema_version"] == 1
+    assert payload["action"] == "prompt_shown"
+    assert payload["surface"] == "mcp"
+    assert payload["session_id"] == "session-1"
+    assert payload["previous_action"] is None
+    assert payload["duration_ms"] is None
+    # No paths/queries in the payload; repo identity is hashed.
+    assert "repo_root" not in payload
+    assert payload["repo_hash"] != str(tmp_path)
+    assert "user_message" not in payload
+    assert "agent_instructions" not in payload
+
+
+def test_record_index_consent_event_carries_previous_action_and_duration(
+    tmp_path: Path,
+) -> None:
+    """granted events written after a build include build duration and the
+    prior recorded action (so "first answer" vs "user changed their mind" is
+    distinguishable).
+    """
+    telemetry_dir = tmp_path / "telemetry"
+
+    record_index_consent_event(
+        telemetry_dir=telemetry_dir,
+        session_id="session-2",
+        surface="mcp",
+        action="granted",
+        repo_root=tmp_path,
+        previous_action="declined",
+        duration_ms=12_345,
+    )
+
+    payload = json.loads(
+        (telemetry_dir / "repoctx-events.jsonl").read_text(encoding="utf-8").strip()
+    )
+    assert payload["action"] == "granted"
+    assert payload["previous_action"] == "declined"
+    assert payload["duration_ms"] == 12_345
 
 
 def test_record_agent_run_writes_jsonl(tmp_path: Path) -> None:

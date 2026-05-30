@@ -64,11 +64,16 @@ def test_mcp_server_writes_repoctx_telemetry(tmp_repo: Path) -> None:
     tool.fn(task="retry")
 
     event_path = telemetry_dir / "repoctx-events.jsonl"
-    lines = event_path.read_text(encoding="utf-8").splitlines()
+    # Filter to the event type this test cares about — other events
+    # (index_consent, etc.) may share the file as the telemetry surface grows.
+    invocations = [
+        json.loads(line)
+        for line in event_path.read_text(encoding="utf-8").splitlines()
+        if json.loads(line).get("event_type") == "repoctx_invocation"
+    ]
 
-    assert len(lines) == 1
-    payload = json.loads(lines[0])
-    assert payload["event_type"] == "repoctx_invocation"
+    assert len(invocations) == 1
+    payload = invocations[0]
     assert payload["surface"] == "mcp"
     assert "query" not in payload
     assert "repo_root" not in payload
