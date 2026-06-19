@@ -134,10 +134,12 @@ three things RepoCtx needs — the package, the embedding model, and the index �
 have to be (re)created at session start. This repo wires that up:
 
 - **`scripts/cloud-setup.sh`** does the work: `pip install -e ".[embeddings]"`
-  (packages), then `python3 -m repoctx index`, which downloads the Qwen3 model on
-  first run (cached afterward) and builds the index. Idempotent; the container
-  filesystem is cached after the first run, so the heavy install + model download
-  are paid roughly once.
+  (packages), then `python3 -m repoctx index --refresh`, which downloads the Qwen3
+  model and builds the index on the first run, and on later runs only re-embeds
+  the `origin/main` delta. The container filesystem is cached after the first run,
+  so the cold start pays the full install + model download + build (a couple of
+  minutes), while **warm sessions skip the install and do a near-no-op refresh —
+  a few seconds.** Both steps are guarded to stay cheap when already satisfied.
 - **Claude Code on the web** runs it automatically via the `SessionStart` hook in
   `.claude/settings.json` → `.claude/hooks/session-start.sh` (gated to remote
   sessions; a no-op locally). The MCP server is registered in `.mcp.json`.
