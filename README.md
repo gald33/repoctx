@@ -127,6 +127,37 @@ codex mcp add repoctx -- python3 -m repoctx.mcp_server
 
 ---
 
+## Cloud sessions (Claude Code on the web, Codex)
+
+Cloud sessions run in an ephemeral container cloned fresh each time, so the
+three things RepoCtx needs — the package, the embedding model, and the index —
+have to be (re)created at session start. This repo wires that up:
+
+- **`scripts/cloud-setup.sh`** does the work: `pip install -e ".[embeddings]"`
+  (packages), then `python3 -m repoctx index`, which downloads the Qwen3 model on
+  first run (cached afterward) and builds the index. Idempotent; the container
+  filesystem is cached after the first run, so the heavy install + model download
+  are paid roughly once.
+- **Claude Code on the web** runs it automatically via the `SessionStart` hook in
+  `.claude/settings.json` → `.claude/hooks/session-start.sh` (gated to remote
+  sessions; a no-op locally). The MCP server is registered in `.mcp.json`.
+- **Codex** registers the server in `.codex/config.toml`. Codex configures setup
+  environment-side rather than via a repo hook, so point your Codex cloud
+  environment's setup script at `bash scripts/cloud-setup.sh`.
+
+The hook is **synchronous** by default: the session waits for setup to finish,
+guaranteeing retrieval is ready before the agent starts, at the cost of a slower
+first session (subsequent sessions hit the cache). To trade that for a faster
+start, make the first line of `.claude/hooks/session-start.sh` emit
+`{"async": true, "asyncTimeout": 600000}`.
+
+> **Network policy.** Setup needs egress to PyPI (packages) and huggingface.co
+> (model). If your environment's network policy blocks either, the build can't
+> run and retrieval degrades to lexical-only (loudly) — see
+> [Embeddings](#embeddings-optional-on-by-default).
+
+---
+
 ## What to ask your agent
 
 Just describe the task normally:

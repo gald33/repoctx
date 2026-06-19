@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "repoctx": {
+      "command": "python3",
+      "args": ["-m", "repoctx.mcp_server"]
+    }
+  }
+}

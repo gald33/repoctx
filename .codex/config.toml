@@ -1,0 +1,8 @@
+# Codex: register repoctx as an MCP server so the agent can call it.
+# Pair this with a Codex cloud environment setup script that runs
+# `bash scripts/cloud-setup.sh` (installs packages + the embedding model and
+# builds the index) — Codex configures setup environment-side rather than via a
+# repo hook, so that step lives in your Codex environment settings.
+[mcp_servers.repoctx]
+command = "python3"
+args = ["-m", "repoctx.mcp_server"]

@@ -6,6 +6,25 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added — cloud-session setup (Claude Code on the web, Codex)
+
+Make RepoCtx usable in ephemeral cloud sessions, where the container is cloned
+fresh each time and lacks the package, the embedding model, and the index.
+
+- **`scripts/cloud-setup.sh`** — shared, idempotent setup: `pip install -e
+  ".[embeddings]"` then `python3 -m repoctx index` (downloads the Qwen3 model on
+  first run, cached after; builds the index). The container caches its filesystem
+  after the first run, so the heavy install + download are paid ~once.
+- **Claude Code on the web** — a `SessionStart` hook
+  (`.claude/hooks/session-start.sh`, registered in `.claude/settings.json`) runs
+  it automatically, gated to remote sessions (`$CLAUDE_CODE_REMOTE`) so it's a
+  no-op locally. Synchronous by default; switch to async via a one-line change.
+  MCP server registered in `.mcp.json`.
+- **Codex** — MCP server registered in `.codex/config.toml`; point the Codex
+  cloud environment's setup script at `bash scripts/cloud-setup.sh`.
+- Needs egress to PyPI + huggingface.co; without it the build can't run and
+  retrieval degrades to lexical-only (loudly).
+
 ### Added — index-build timing telemetry
 
 Every embedding-index build now records an `index_build` telemetry event with a
