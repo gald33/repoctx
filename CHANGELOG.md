@@ -6,6 +6,8 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-06-19
+
 ### Added — cloud-session setup (Claude Code on the web, Codex)
 
 Make RepoCtx usable in ephemeral cloud sessions, where the container is cloned
