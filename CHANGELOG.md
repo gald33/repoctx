@@ -12,9 +12,12 @@ Make RepoCtx usable in ephemeral cloud sessions, where the container is cloned
 fresh each time and lacks the package, the embedding model, and the index.
 
 - **`scripts/cloud-setup.sh`** — shared, idempotent setup: `pip install -e
-  ".[embeddings]"` then `python3 -m repoctx index` (downloads the Qwen3 model on
-  first run, cached after; builds the index). The container caches its filesystem
-  after the first run, so the heavy install + download are paid ~once.
+  ".[embeddings]"` (skipped when already importable) then `python3 -m repoctx
+  index --refresh` (full build + Qwen3 model download on the first run; only the
+  `origin/main` delta thereafter). The container caches its filesystem after the
+  first run, so the cold start pays the full install + build (a couple of
+  minutes) while warm sessions skip the install and do a near-no-op refresh — a
+  few seconds.
 - **Claude Code on the web** — a `SessionStart` hook
   (`.claude/hooks/session-start.sh`, registered in `.claude/settings.json`) runs
   it automatically, gated to remote sessions (`$CLAUDE_CODE_REMOTE`) so it's a
