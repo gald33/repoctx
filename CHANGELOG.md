@@ -6,6 +6,27 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added — index-build timing telemetry
+
+Every embedding-index build now records an `index_build` telemetry event with a
+phase breakdown, so the build cost we kept *estimating* (notably "is a slow
+build the one-time model load/download, or the corpus embed that scales with
+repo size?") is actually measured.
+
+- **What's captured.** `build_index` fills an optional `metrics_out` dict with
+  `model_load_ms` vs `embed_ms` vs `scan_ms`, `total_ms`, chunk/file counts,
+  `embedded_chunk_count` (how much an incremental build actually re-embedded),
+  and the resolved `device`/`dtype`/`model_name`. The CLI (`repoctx index` /
+  `rebuild`) and the MCP `index` tool both emit the event; the CLI also prints
+  a one-line breakdown after each build.
+- **Surfaced in `repoctx stats`.** The total lands in the per-op latency table
+  automatically (it keys off `duration_ms`); a dedicated **Index builds**
+  section adds the model-load/embed/scan split and per-build corpus size.
+- **Privacy.** Every field is a count, timing, or low-cardinality enum
+  (`model_name` is a constant model id, `device` is `cpu`/`cuda`/`mps`) — no
+  paths or content — so it rides the existing redacted reporting path
+  unchanged when reporting is enabled.
+
 ### Added — anonymous reporting + canary release channel
 
 Optional opt-in upload layer (`repoctx.reporting`) on top of the existing

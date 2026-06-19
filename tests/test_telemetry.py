@@ -9,6 +9,7 @@ from repoctx.telemetry import (
     record_agent_run,
     record_experiment_lane,
     record_experiment_session,
+    record_index_build,
     record_index_consent_event,
     record_repoctx_invocation,
     save_active_experiment,
@@ -104,6 +105,51 @@ def test_record_index_consent_event_carries_previous_action_and_duration(
     assert payload["action"] == "granted"
     assert payload["previous_action"] == "declined"
     assert payload["duration_ms"] == 12_345
+
+
+def test_record_index_build_writes_jsonl(tmp_path: Path) -> None:
+    telemetry_dir = tmp_path / "telemetry"
+
+    record_index_build(
+        telemetry_dir=telemetry_dir,
+        session_id="session-1",
+        surface="cli",
+        repo_root=tmp_path,
+        success=True,
+        duration_ms=12_345,
+        source="origin-main",
+        incremental=False,
+        chunk_count=456,
+        file_count=95,
+        embedded_chunk_count=456,
+        model_load_ms=8_100,
+        embed_ms=3_900,
+        scan_ms=300,
+        device="cpu",
+        dtype="fp32",
+        model_name="Qwen/Qwen3-Embedding-0.6B",
+        output_bytes=1_870_000,
+    )
+
+    event_path = telemetry_dir / "repoctx-events.jsonl"
+    payload = json.loads(event_path.read_text(encoding="utf-8").strip())
+
+    assert payload["event_type"] == "index_build"
+    assert payload["schema_version"] == 1
+    assert payload["event_time"].endswith("Z")
+    # Total duration is a top-level field so `repoctx stats` aggregates it as an op.
+    assert payload["duration_ms"] == 12_345
+    assert payload["model_load_ms"] == 8_100
+    assert payload["embed_ms"] == 3_900
+    assert payload["scan_ms"] == 300
+    assert payload["chunk_count"] == 456
+    assert payload["embedded_chunk_count"] == 456
+    assert payload["device"] == "cpu"
+    assert payload["source"] == "origin-main"
+    assert payload["incremental"] is False
+    # No paths in the payload; repo identity is hashed.
+    assert "repo_root" not in payload
+    assert payload["repo_hash"] != str(tmp_path)
 
 
 def test_record_agent_run_writes_jsonl(tmp_path: Path) -> None:

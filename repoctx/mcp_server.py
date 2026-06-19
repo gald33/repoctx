@@ -16,6 +16,7 @@ from repoctx.index_consent import (
 from repoctx.models import ContextMetrics, ContextResponse
 from repoctx.retriever import get_task_context as repo_get_task_context
 from repoctx.telemetry import (
+    record_index_build,
     record_index_consent_event,
     record_repoctx_invocation,
 )
@@ -626,7 +627,8 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
         def _build() -> dict[str, object]:
             build_started = perf_counter()
             errors: dict[str, str] = {}
-            status = _maybe_build_index(root, True, errors)
+            build_metrics: dict[str, object] = {}
+            status = _maybe_build_index(root, True, errors, metrics_out=build_metrics)
             if errors:
                 return {"status": "error", "errors": errors}
             if status is None:
@@ -652,6 +654,28 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
                 )
             except Exception:
                 logger.debug("Failed to record granted telemetry", exc_info=True)
+            try:
+                record_index_build(
+                    telemetry_dir=telemetry_dir,
+                    session_id=uuid4().hex,
+                    surface="mcp",
+                    repo_root=root,
+                    success=True,
+                    duration_ms=int((perf_counter() - build_started) * 1000),
+                    source=str(build_metrics.get("source", "origin-main")),
+                    incremental=bool(build_metrics.get("incremental", False)),
+                    chunk_count=int(build_metrics.get("chunk_count", 0) or 0),
+                    file_count=int(build_metrics.get("file_count", 0) or 0),
+                    embedded_chunk_count=int(build_metrics.get("embedded_chunk_count", 0) or 0),
+                    model_load_ms=build_metrics.get("model_load_ms"),  # type: ignore[arg-type]
+                    embed_ms=build_metrics.get("embed_ms"),  # type: ignore[arg-type]
+                    scan_ms=build_metrics.get("scan_ms"),  # type: ignore[arg-type]
+                    device=build_metrics.get("device"),  # type: ignore[arg-type]
+                    dtype=build_metrics.get("dtype"),  # type: ignore[arg-type]
+                    model_name=build_metrics.get("model_name"),  # type: ignore[arg-type]
+                )
+            except Exception:
+                logger.debug("Failed to record index_build telemetry", exc_info=True)
             # _maybe_build_index returns {"status": "built", "files": N, "index_dir": ...}
             return status
 

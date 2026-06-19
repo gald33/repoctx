@@ -375,6 +375,8 @@ Import-graph expansion works for Python (`import`, `from`) and JavaScript/TypeSc
 
 RepoCtx writes local JSONL telemetry to `~/.repoctx/telemetry/` by default. Task text and repo identifiers are hashed before storage. Set `REPOCTX_TELEMETRY_DIR` to change the location. **Local telemetry never leaves your machine** unless you opt in to reporting (see below).
 
+Index builds are timed too: `repoctx index` / `rebuild` print a one-line breakdown (`model load` vs `embed` vs `scan`) and record an `index_build` event. Run `repoctx stats` to see the model-load-vs-embed split and per-build corpus size aggregated across builds — useful for deciding whether a slow build is the one-time model load or the repo-sized embed.
+
 ### Anonymous reporting (opt-in on stable, default-on on canary)
 
 To help tune retrieval, RepoCtx can upload a *redacted* subset of telemetry events (counts, timings, error classes — see below) to a maintainer-run ingest endpoint. The privacy contract:

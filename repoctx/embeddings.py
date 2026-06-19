@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from time import perf_counter
-from typing import TYPE_CHECKING, Iterator
+from typing import TYPE_CHECKING, Any, Iterator
 
 from repoctx.chunker import Chunk, ChunkConfig, chunk_record
 from repoctx.config import DEFAULT_EMBEDDING_CONFIG, EmbeddingConfig
@@ -565,6 +565,7 @@ def build_index(
     chunk_config: ChunkConfig | None = None,
     incremental: bool = False,
     source: str = "origin-main",
+    metrics_out: dict[str, Any] | None = None,
 ) -> VectorIndex:
     """Scan a repository, chunk every file, embed each chunk, and return a VectorIndex.
 
@@ -585,17 +586,28 @@ def build_index(
     no longer produced by the current scan are dropped. If the old index is
     missing, schema-incompatible, or built with a different model/chunker, we
     log a warning and fall back to a full rebuild.
+
+    When ``metrics_out`` is provided it's populated in place with a timing
+    breakdown (``total_ms``, ``scan_ms``, ``model_load_ms``, ``embed_ms``),
+    counts (``chunk_count``, ``file_count``, ``embedded_chunk_count``), and
+    context (``source``, ``incremental``, ``device``, ``dtype``,
+    ``model_name``) so callers can record an ``index_build`` telemetry event
+    without re-deriving any of it. Purely observational — it never changes what
+    gets built.
     """
     from repoctx.vector_index import VectorIndex
 
     chunk_cfg = chunk_config or ChunkConfig()
     root = Path(repo_root).resolve()
+    total_started = perf_counter()
 
     existing: VectorIndex | None = None
     if incremental:
         existing = _load_compatible_existing_index(root, config, chunk_cfg)
 
+    scan_started = perf_counter()
     repo_index, source_meta = _scan_for_source(root, source)
+    scan_ms = int((perf_counter() - scan_started) * 1000)
     records: list[FileRecord] = list(repo_index.records.values())
     entries_proto: list[tuple[FileRecord, Chunk]] = []
     skipped_empty = 0
@@ -610,10 +622,26 @@ def build_index(
     if existing is None:
         result = _full_build(
             entries_proto, config, chunk_cfg, len(records), skipped_empty,
+            metrics_out=metrics_out,
         )
     else:
-        result = _incremental_build(existing, entries_proto, config, chunk_cfg)
+        result = _incremental_build(
+            existing, entries_proto, config, chunk_cfg, metrics_out=metrics_out,
+        )
     result.source_meta = source_meta
+
+    if metrics_out is not None:
+        metrics_out.setdefault("model_load_ms", 0)
+        metrics_out.setdefault("embed_ms", 0)
+        metrics_out.setdefault("embedded_chunk_count", 0)
+        metrics_out["scan_ms"] = scan_ms
+        metrics_out["total_ms"] = int((perf_counter() - total_started) * 1000)
+        metrics_out["chunk_count"] = len(result)
+        metrics_out["file_count"] = len({e.path for e in result.entries})
+        metrics_out["source"] = source_meta.get("built_from", source)
+        metrics_out["incremental"] = existing is not None
+        metrics_out.setdefault("model_name", config.model_name)
+
     return result
 
 
@@ -786,16 +814,44 @@ def base_staleness_warning(status: dict) -> str | None:
     return None
 
 
+def _capture_model_metrics(
+    metrics_out: dict[str, Any] | None,
+    model: EmbeddingModel,
+    *,
+    model_load_ms: int,
+    embed_ms: int,
+    embedded_chunk_count: int,
+) -> None:
+    """Populate model-load/embed timings + device context into *metrics_out*.
+
+    No-op when ``metrics_out`` is None, so build paths that don't care pay
+    nothing. Reads the device/dtype the model actually resolved to (which may
+    differ from config after an MPS→CPU fallback).
+    """
+    if metrics_out is None:
+        return
+    metrics_out["model_load_ms"] = model_load_ms
+    metrics_out["embed_ms"] = embed_ms
+    metrics_out["embedded_chunk_count"] = embedded_chunk_count
+    metrics_out["device"] = getattr(model, "_device", None)
+    metrics_out["dtype"] = getattr(model, "_dtype", None)
+    metrics_out["model_name"] = getattr(getattr(model, "config", None), "model_name", None)
+
+
 def _full_build(
     entries_proto: list[tuple[FileRecord, Chunk]],
     config: EmbeddingConfig,
     chunk_cfg: ChunkConfig,
     total_records: int,
     skipped_empty: int,
+    *,
+    metrics_out: dict[str, Any] | None = None,
 ) -> VectorIndex:
     from repoctx.vector_index import VectorIndex
 
+    model_load_started = perf_counter()
     model = EmbeddingModel(config)
+    model_load_ms = int((perf_counter() - model_load_started) * 1000)
     texts = [build_enriched_chunk_text(record, chunk) for record, chunk in entries_proto]
 
     logger.info(
@@ -806,6 +862,12 @@ def _full_build(
     vectors = model.encode_documents(texts)
     elapsed = perf_counter() - started
     logger.info("Embedded %d chunks in %.1f s", len(texts), elapsed)
+    _capture_model_metrics(
+        metrics_out, model,
+        model_load_ms=model_load_ms,
+        embed_ms=int(elapsed * 1000),
+        embedded_chunk_count=len(texts),
+    )
 
     entries = [_chunk_to_entry(record, chunk) for record, chunk in entries_proto]
     return VectorIndex(
@@ -822,6 +884,8 @@ def _incremental_build(
     entries_proto: list[tuple[FileRecord, Chunk]],
     config: EmbeddingConfig,
     chunk_cfg: ChunkConfig,
+    *,
+    metrics_out: dict[str, Any] | None = None,
 ) -> VectorIndex:
     """Re-embed only changed/new chunks; reuse vectors for unchanged ones."""
     from repoctx.vector_index import VectorIndex
@@ -869,20 +933,40 @@ def _incremental_build(
             chunk_config=_chunk_config_to_dict(chunk_cfg),
         )
 
+    model: EmbeddingModel | None = None
+    model_load_ms = 0
     if to_embed:
+        model_load_started = perf_counter()
         model = EmbeddingModel(config)
+        model_load_ms = int((perf_counter() - model_load_started) * 1000)
         dim = model.dimension
     vectors = _np.zeros((n, dim), dtype=_np.float32)
     for final_pos, old_row in reuse_pairs:
         vectors[final_pos] = existing.vectors[old_row]
-    if to_embed:
+    embed_ms = 0
+    if to_embed and model is not None:
         texts = [build_enriched_chunk_text(rec, ch) for _, rec, ch in to_embed]
         started = perf_counter()
         new_vecs = model.encode_documents(texts, show_progress=len(texts) > 32)
-        elapsed = perf_counter() - started
-        logger.info("Embedded %d chunks in %.1f s (incremental)", len(texts), elapsed)
+        embed_ms = int((perf_counter() - started) * 1000)
+        logger.info("Embedded %d chunks in %.1f s (incremental)", len(texts), embed_ms / 1000)
         for (final_pos, _, _), v in zip(to_embed, new_vecs):
             vectors[final_pos] = v
+
+    if model is not None:
+        _capture_model_metrics(
+            metrics_out, model,
+            model_load_ms=model_load_ms,
+            embed_ms=embed_ms,
+            embedded_chunk_count=len(to_embed),
+        )
+    elif metrics_out is not None:
+        # An incremental build that re-embedded nothing: no model was loaded,
+        # so there's no device/dtype to report — record the zero timings so the
+        # event still distinguishes "ran, no-op" from "never ran".
+        metrics_out["model_load_ms"] = 0
+        metrics_out["embed_ms"] = 0
+        metrics_out["embedded_chunk_count"] = 0
 
     return VectorIndex(
         vectors=vectors,

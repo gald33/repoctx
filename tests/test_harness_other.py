@@ -74,7 +74,7 @@ def test_install_all_skips_index_when_extras_missing(tmp_path: Path, monkeypatch
 def test_install_all_builds_index_when_extras_present(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeIndex(n=7)
     monkeypatch.setattr(embeddings_mod, "HAS_EMBEDDINGS", True)
-    monkeypatch.setattr(embeddings_mod, "build_index", lambda root: fake)
+    monkeypatch.setattr(embeddings_mod, "build_index", lambda root, metrics_out=None: fake)
     result = install_all(tmp_path, scaffold_authority=False)
     assert result["errors"] == {}
     info = result["installed"]["embedding_index"]

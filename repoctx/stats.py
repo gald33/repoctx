@@ -103,12 +103,17 @@ def compute_stats(
             if len(recent_errors) >= 10:
                 break
 
+    index_builds = _index_build_summary(
+        [e for e in events if e.get("event_type") == "index_build"]
+    )
+
     return {
         "schema_version": "repoctx-stats/1",
         "telemetry_dir": str(get_telemetry_dir(telemetry_dir)),
         "window_days": days,
         "total_events": len(events),
         "by_op": op_summary,
+        "index_builds": index_builds,
         "daily_activity": daily,
         "top_repos": [
             {"repo_hash": h, "count": c}
@@ -145,6 +150,34 @@ def render_markdown(stats: dict[str, Any]) -> str:
         )
     lines.append("")
 
+    ib = stats.get("index_builds") or {}
+    if ib.get("count"):
+        lines.append("## Index builds\n")
+        lines.append(
+            f"_{ib['count']} build(s), {ib.get('success_count', 0)} ok — "
+            "model-load vs embed is the split that matters_\n"
+        )
+        lines.append("| Phase | p50 ms | p95 ms | max ms |")
+        lines.append("|---|---:|---:|---:|")
+        for label, key in (
+            ("total", "total_ms"),
+            ("model load", "model_load_ms"),
+            ("embed", "embed_ms"),
+            ("scan", "scan_ms"),
+        ):
+            p = ib.get(key) or {}
+            lines.append(
+                f"| {label} | {p.get('p50', 0)} | {p.get('p95', 0)} | {p.get('max', 0)} |"
+            )
+        cc = (ib.get("chunk_count") or {}).get("p50", 0)
+        fc = (ib.get("file_count") or {}).get("p50", 0)
+        eb = (ib.get("output_bytes") or {}).get("p50", 0)
+        lines.append("")
+        lines.append(
+            f"- per build (p50): {cc} chunks · {fc} files · {eb // 1024} KiB on disk"
+        )
+        lines.append("")
+
     if stats["surface_breakdown"]:
         lines.append("## By surface\n")
         for s in stats["surface_breakdown"]:
@@ -169,6 +202,33 @@ def render_markdown(stats: dict[str, Any]) -> str:
 
 
 # ---- internals ---------------------------------------------------------------
+
+
+def _index_build_summary(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Phase-timing percentiles across ``index_build`` events.
+
+    The per-op summary already reports total build latency; this adds the
+    component breakdown (model-load vs embed vs scan) and the per-build corpus
+    size, so "is the build slow because of the model or the repo?" is answerable
+    from telemetry alone.
+    """
+    if not events:
+        return {"count": 0}
+
+    def col(key: str) -> list[int]:
+        return [int(e[key]) for e in events if isinstance(e.get(key), (int, float))]
+
+    return {
+        "count": len(events),
+        "success_count": sum(1 for e in events if e.get("success")),
+        "total_ms": _percentiles(col("duration_ms")),
+        "model_load_ms": _percentiles(col("model_load_ms")),
+        "embed_ms": _percentiles(col("embed_ms")),
+        "scan_ms": _percentiles(col("scan_ms")),
+        "chunk_count": _percentiles(col("chunk_count")),
+        "file_count": _percentiles(col("file_count")),
+        "output_bytes": _percentiles(col("output_bytes")),
+    }
 
 
 def _percentiles(values: list[int]) -> dict[str, int]:
