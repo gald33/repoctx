@@ -55,7 +55,18 @@ The workflow fires on `v*` tag push, verifies tag-vs-version, builds wheel + sdi
 
 If the verification step fails (tag doesn't match `project.version`), delete the broken tag (`git tag -d v<x.y.z>` and `git push --delete origin v<x.y.z>`), fix the mismatch, retag, push.
 
-### Canary releases
+### Stable release without a tag push (GitHub Actions tab)
+
+The same workflow has a `workflow_dispatch` trigger whose channel **defaults to `stable`**. On a non-tag run the tag-vs-version check is skipped, so it builds and publishes straight from `main`'s `pyproject.version`. Use this when a tag push isn't available:
+
+- **GitHub UI:** Actions → **Publish PyPI** → **Run workflow** → branch `main`, channel `stable` → Run.
+- **CLI:** `gh workflow run publish-pypi.yml -f channel=stable --ref main`.
+
+`main` must already carry the release commit (`pyproject.version` bumped + dated changelog) before dispatching — the build publishes whatever version is on `main`. This path does **not** create a `v<x.y.z>` tag; add one afterwards if you want the record (pushing it re-triggers the workflow, which then fails on the duplicate PyPI upload — expected, harmless).
+
+**Agent note:** a sandboxed agent environment typically **cannot** fire either trigger — the git proxy `403`s tag (and `main`) pushes, and the MCP integration token lacks `actions: write` (dispatch returns "Resource not accessible by integration"). Prepare the release commit on a feature branch and merge it via PR, then hand the final tag-push / `Run workflow` dispatch to a human.
+
+
 
 Canary releases share the same workflow file but trigger via manual dispatch:
 
