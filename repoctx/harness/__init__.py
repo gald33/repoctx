@@ -71,11 +71,15 @@ def _maybe_build_index(
     repo_root: str | Path,
     build_index: bool | None,
     errors: dict[str, str],
+    metrics_out: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Build the embedding index per the ``build_index`` tri-state.
 
     Returns the status dict to record under ``installed.embedding_index``, or
-    ``None`` to omit the key entirely (when ``build_index=False``).
+    ``None`` to omit the key entirely (when ``build_index=False``). When
+    ``metrics_out`` is provided it's filled with the build's timing breakdown
+    (see :func:`repoctx.embeddings.build_index`) so the caller can emit an
+    ``index_build`` telemetry event.
     """
     if build_index is False:
         return None
@@ -96,7 +100,7 @@ def _maybe_build_index(
 
     root = Path(repo_root).resolve()
     try:
-        record_store = _build_index(root)
+        record_store = _build_index(root, metrics_out=metrics_out)
         emb_dir = root / DEFAULT_EMBEDDING_CONFIG.index_dir / "embeddings"
         record_store.save(emb_dir)
     except Exception as exc:  # pragma: no cover - defensive

@@ -499,6 +499,11 @@ class _FakeModel:
         self._np = np
         self.dimension = 8
         self.encoded_texts: list[list[str]] = []
+        # Attributes read by build_index's metrics capture; harmless to tests
+        # that ignore them.
+        self._device = "cpu"
+        self._dtype = "fp32"
+        self.config = EmbeddingConfig()
 
     def encode_documents(self, texts, *, show_progress=True):
         self.encoded_texts.append(list(texts))
@@ -846,3 +851,72 @@ def test_update_file_in_index_replaces_all_chunks(tmp_path: Path) -> None:
         after = sum(1 for e in reloaded.entries if e.path == "long.py")
         assert after >= 1
         assert after < before  # old chunks were removed
+
+
+# -- build_index metrics_out (the "measure ourselves" plumbing) --------------
+
+
+def test_build_index_populates_metrics_out(tmp_path: Path) -> None:
+    """A full build fills metrics_out with the timing breakdown + context."""
+    pytest.importorskip("numpy")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_two_files(repo)
+
+    fake = _FakeModel()
+    metrics: dict = {}
+    with patch("repoctx.embeddings.EmbeddingModel", return_value=fake):
+        from repoctx.embeddings import build_index
+
+        idx = build_index(repo, source="worktree", metrics_out=metrics)
+
+    assert metrics["source"] == "worktree"
+    assert metrics["incremental"] is False
+    assert metrics["chunk_count"] == len(idx)
+    assert metrics["file_count"] == 2
+    assert metrics["embedded_chunk_count"] == len(idx)
+    # Resolved device/dtype/model come off the (mocked) model.
+    assert metrics["device"] == "cpu"
+    assert metrics["dtype"] == "fp32"
+    assert metrics["model_name"] == EmbeddingConfig().model_name
+    # All four phase timings present and non-negative ints.
+    for key in ("total_ms", "scan_ms", "model_load_ms", "embed_ms"):
+        assert isinstance(metrics[key], int)
+        assert metrics[key] >= 0
+
+
+def test_build_index_metrics_incremental_no_op_records_zero_embed(tmp_path: Path) -> None:
+    """An incremental rerun with no changes loads no model and embeds nothing —
+    the metrics reflect that (zeros), distinguishing 'ran, no-op' from 'failed'.
+    """
+    pytest.importorskip("numpy")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_two_files(repo)
+
+    cfg = EmbeddingConfig()
+    chunk_cfg = _small_chunk_cfg()
+    index_dir = repo / cfg.index_dir / "embeddings"
+
+    with patch("repoctx.embeddings.EmbeddingModel", return_value=_FakeModel()):
+        from repoctx.embeddings import build_index
+
+        idx = build_index(repo, config=cfg, chunk_config=chunk_cfg, source="worktree")
+        idx.save(index_dir)
+
+    metrics: dict = {}
+    with patch("repoctx.embeddings.EmbeddingModel", return_value=_FakeModel()):
+        from repoctx.embeddings import build_index
+
+        build_index(
+            repo, config=cfg, chunk_config=chunk_cfg, incremental=True,
+            source="worktree", metrics_out=metrics,
+        )
+
+    assert metrics["incremental"] is True
+    assert metrics["embedded_chunk_count"] == 0
+    assert metrics["model_load_ms"] == 0
+    assert metrics["embed_ms"] == 0
+    # Corpus counts still reflect the full index, not the (empty) delta.
+    assert metrics["chunk_count"] == len(idx)
+    assert metrics["file_count"] == 2

@@ -13,6 +13,9 @@ logger = logging.getLogger(__name__)
 def _build_and_save_index(
     repo: Path, *, incremental: bool = False, source: str = "origin-main",
 ) -> None:
+    from time import perf_counter
+    from uuid import uuid4
+
     try:
         from repoctx.embeddings import build_index
     except ImportError:
@@ -25,13 +28,40 @@ def _build_and_save_index(
     # Pull any pre-1.5 in-tree index up to the shared location first so an
     # incremental build splices onto it instead of re-embedding from scratch.
     migrate_legacy_index_if_needed(repo)
+
+    # Collected in place by build_index: model-load vs embed vs scan timings,
+    # counts, device. We record it as an `index_build` telemetry event (and a
+    # human-readable breakdown) so the build cost we keep guessing at is
+    # actually measured. Failures are recorded too, with the error class.
+    metrics: dict = {}
+    session_id = uuid4().hex
+    started = perf_counter()
     try:
-        record_store = build_index(repo, incremental=incremental, source=source)
+        record_store = build_index(
+            repo, incremental=incremental, source=source, metrics_out=metrics,
+        )
     except ImportError as exc:
         print(f"{exc}", file=sys.stderr)
         raise SystemExit(1)
+    except Exception as exc:
+        _record_index_build(
+            repo, session_id, metrics,
+            duration_ms=int((perf_counter() - started) * 1000),
+            success=False, source=source, incremental=incremental,
+            error_type=type(exc).__name__,
+        )
+        raise
+
     emb_dir = shared_embeddings_dir(repo)
     record_store.save(emb_dir)
+    duration_ms = int((perf_counter() - started) * 1000)
+
+    _record_index_build(
+        repo, session_id, metrics,
+        duration_ms=duration_ms, success=True, source=source,
+        incremental=incremental, output_bytes=_emb_dir_bytes(emb_dir),
+    )
+
     unique_files = len({e.path for e in record_store.entries})
     mode = "incrementally" if incremental else "fully"
     built_from = record_store.source_meta.get("built_from", source)
@@ -41,6 +71,79 @@ def _build_and_save_index(
         f"Indexed {len(record_store)} chunks across {unique_files} files "
         f"({mode}, {built_from}{suffix}) → {emb_dir}"
     )
+    print("  " + _format_build_breakdown(duration_ms, metrics))
+
+
+def _emb_dir_bytes(emb_dir: Path) -> int:
+    """Total on-disk size of the index (vectors + metadata + config)."""
+    total = 0
+    for name in ("vectors.npy", "metadata.json", "index_config.json"):
+        try:
+            total += (emb_dir / name).stat().st_size
+        except OSError:
+            pass
+    return total
+
+
+def _format_build_breakdown(duration_ms: int, metrics: dict) -> str:
+    """One-line human summary: total wall-clock split into its phases.
+
+    The model-load vs embed split is the whole point — it tells you whether a
+    slow build is the one-time model download/load or the corpus embed that
+    scales with repo size.
+    """
+    def s(ms) -> str:
+        return f"{(ms or 0) / 1000:.1f}s"
+
+    parts = (
+        f"model load {s(metrics.get('model_load_ms'))} · "
+        f"embed {s(metrics.get('embed_ms'))} · "
+        f"scan {s(metrics.get('scan_ms'))}"
+    )
+    device = metrics.get("device") or "?"
+    dtype = metrics.get("dtype") or "?"
+    embedded = metrics.get("embedded_chunk_count", 0)
+    return f"build {s(duration_ms)}  ({parts})  [{device}/{dtype}, {embedded} embedded]"
+
+
+def _record_index_build(
+    repo: Path,
+    session_id: str,
+    metrics: dict,
+    *,
+    duration_ms: int,
+    success: bool,
+    source: str,
+    incremental: bool,
+    output_bytes: int = 0,
+    error_type: str | None = None,
+) -> None:
+    """Best-effort `index_build` telemetry write. Never breaks the build."""
+    try:
+        from repoctx.telemetry import record_index_build
+
+        record_index_build(
+            session_id=session_id,
+            surface="cli",
+            repo_root=repo,
+            success=success,
+            duration_ms=duration_ms,
+            source=metrics.get("source", source),
+            incremental=metrics.get("incremental", incremental),
+            chunk_count=metrics.get("chunk_count", 0),
+            file_count=metrics.get("file_count", 0),
+            embedded_chunk_count=metrics.get("embedded_chunk_count", 0),
+            model_load_ms=metrics.get("model_load_ms"),
+            embed_ms=metrics.get("embed_ms"),
+            scan_ms=metrics.get("scan_ms"),
+            device=metrics.get("device"),
+            dtype=metrics.get("dtype"),
+            model_name=metrics.get("model_name"),
+            output_bytes=output_bytes,
+            error_type=error_type,
+        )
+    except Exception:  # noqa: BLE001 — telemetry must never break a build
+        logger.debug("Failed to record index_build telemetry", exc_info=True)
 
 
 def _refresh_index(repo: Path) -> None:

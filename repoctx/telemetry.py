@@ -306,6 +306,77 @@ def record_index_consent_event(
     return written
 
 
+def record_index_build(
+    *,
+    telemetry_dir: str | Path | None = None,
+    session_id: str,
+    surface: Surface = DEFAULT_SURFACE,
+    repo_root: str | Path,
+    success: bool,
+    duration_ms: int,
+    source: str,
+    incremental: bool,
+    chunk_count: int,
+    file_count: int,
+    embedded_chunk_count: int,
+    model_load_ms: int | None = None,
+    embed_ms: int | None = None,
+    scan_ms: int | None = None,
+    device: str | None = None,
+    dtype: str | None = None,
+    model_name: str | None = None,
+    output_bytes: int = 0,
+    error_type: str | None = None,
+) -> Path:
+    """Record a single embedding-index build with a timing breakdown.
+
+    Emitted once per ``repoctx index`` / ``rebuild`` (CLI) or ``index`` MCP
+    build. The whole point is to *measure* the cost we keep guessing at — most
+    importantly the split between ``model_load_ms`` (loading/downloading the
+    embedding model, a one-time/cacheable cost) and ``embed_ms`` (encoding the
+    corpus, the part that scales with repo size). ``duration_ms`` is the total
+    wall-clock so the event lands in ``repoctx stats`` per-op latency
+    automatically; the component timings ride alongside for the breakdown.
+
+    Like ``record_protocol_op``, this enqueues to the reporting layer when
+    enabled. Every field is a count, timing, or low-cardinality enum — the
+    upload boundary already strips path/query/code-bearing keys, and none of
+    these are path-bearing (``model_name`` is a constant model id, ``device`` is
+    ``cpu``/``cuda``/``mps``), so the breakdown survives redaction intact.
+    """
+    payload: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "event_type": "index_build",
+        "event_time": utc_now_seconds(),
+        "session_id": session_id,
+        "surface": surface,
+        "repo_hash": sha256_hex(str(Path(repo_root).resolve())),
+        "success": success,
+        "error_type": error_type,
+        "duration_ms": duration_ms,
+        "model_load_ms": model_load_ms,
+        "embed_ms": embed_ms,
+        "scan_ms": scan_ms,
+        "source": source,
+        "incremental": incremental,
+        "chunk_count": chunk_count,
+        "file_count": file_count,
+        "embedded_chunk_count": embedded_chunk_count,
+        "device": device,
+        "dtype": dtype,
+        "model_name": model_name,
+        "output_bytes": output_bytes,
+    }
+    written = append_jsonl(telemetry_dir, REPOCTX_EVENTS_FILE, payload)
+    try:
+        from repoctx import reporting as _reporting
+
+        _reporting.enqueue_if_enabled(payload, repo_root=repo_root)
+    except Exception:  # noqa: BLE001 — never break local telemetry on reporting failure
+        pass
+    return written
+
+
 def record_agent_run(
     *,
     telemetry_dir: str | Path | None = None,

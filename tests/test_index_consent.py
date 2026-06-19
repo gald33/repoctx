@@ -291,7 +291,9 @@ def test_index_tool_skips_build_when_extras_missing(tmp_repo: Path) -> None:
     assert read_consent(tmp_repo) is None
 
 
-def test_index_tool_records_granted_on_successful_build(tmp_repo: Path, monkeypatch) -> None:
+def test_index_tool_records_granted_on_successful_build(
+    tmp_repo: Path, tmp_path: Path, monkeypatch
+) -> None:
     """A successful build flips consent to 'granted'.
 
     We stub `_maybe_build_index` so we don't load the embedding model in tests
@@ -299,10 +301,10 @@ def test_index_tool_records_granted_on_successful_build(tmp_repo: Path, monkeypa
     download). The stub returns the same shape the real function returns on
     success.
     """
-    server = create_server(repo_root=tmp_repo)
+    server = create_server(repo_root=tmp_repo, telemetry_dir=tmp_path / ".telemetry")
     tool = _get_tool(server, "index")
 
-    def fake_build(repo_root, build_index, errors):
+    def fake_build(repo_root, build_index, errors, metrics_out=None):
         return {"status": "built", "files": 0, "index_dir": str(tmp_repo / ".repoctx" / "embeddings")}
 
     monkeypatch.setattr("repoctx.harness._maybe_build_index", fake_build)
@@ -382,7 +384,7 @@ def test_granted_telemetry_includes_build_duration(
     server = create_server(repo_root=tmp_repo, telemetry_dir=telemetry_dir)
     tool = _get_tool(server, "index")
 
-    def fake_build(repo_root, build_index, errors):
+    def fake_build(repo_root, build_index, errors, metrics_out=None):
         return {"status": "built", "files": 0, "index_dir": str(tmp_repo / ".repoctx" / "embeddings")}
 
     monkeypatch.setattr("repoctx.harness._maybe_build_index", fake_build)
@@ -406,7 +408,7 @@ def test_declined_then_granted_records_previous_action(
     tool = _get_tool(server, "index")
     tool.fn(decline=True)
 
-    def fake_build(repo_root, build_index, errors):
+    def fake_build(repo_root, build_index, errors, metrics_out=None):
         return {"status": "built", "files": 0, "index_dir": str(tmp_repo / ".repoctx" / "embeddings")}
 
     monkeypatch.setattr("repoctx.harness._maybe_build_index", fake_build)
