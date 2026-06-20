@@ -370,6 +370,97 @@ def test_mcp_server_explicit_repo_root_switches_session_memo(
     assert any(d["path"] == "BETA.md" for d in res_b2["relevant_docs"])
 
 
+def test_mcp_server_live_cwd_overrides_stale_session_memo(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A live cwd signal must override a memo from a previously-resolved repo.
+
+    Regression for cross-repo bleed: after resolving repo A (memoized), moving
+    the working directory into repo B and calling without repo_root must target
+    B — not silently keep serving A's tree (which is what surfaced another
+    project's contracts/tests in validate_plan).
+    """
+    repo_a = _make_git_repo(tmp_path / "a")
+    repo_b = _make_git_repo(tmp_path / "b")
+    write_file(repo_a / "ALPHA.md", "# Repo A\n")
+    write_file(repo_b / "BETA.md", "# Repo B\n")
+    cache_dir = tmp_path / "cache"
+    _isolate_resolution(monkeypatch, cache_dir)
+    monkeypatch.chdir("/")  # no live signal yet — only the per-call arg resolves
+    server = create_server(telemetry_dir=tmp_path / ".telemetry")
+    tool = _get_tool(server, "get_task_context")
+    # Resolve + memoize A explicitly (cwd=/ gives no live signal).
+    res_a = tool.fn(task="alpha", repo_root=str(repo_a))
+    assert any(d["path"] == "ALPHA.md" for d in res_a["relevant_docs"])
+    # Move into B's working tree and omit repo_root: the live cwd must win.
+    monkeypatch.chdir(repo_b)
+    res_b = tool.fn(task="beta")
+    assert any(d["path"] == "BETA.md" for d in res_b["relevant_docs"])
+    # And A's tree must no longer leak through.
+    assert not any(d["path"] == "ALPHA.md" for d in res_b["relevant_docs"])
+
+
+def test_mcp_server_non_repo_cwd_falls_back_to_session_memo(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A live cwd that isn't a git repo must fall back to the memo, not error.
+
+    The live-signal override only wins when the signal actually resolves to a
+    repository; a non-repo cwd must not clobber a usable session memo.
+    """
+    repo = _make_git_repo(tmp_path / "memoized")
+    write_file(repo / "AGENTS.md", "# Repo guidance\n")
+    non_repo = tmp_path / "scratch"
+    non_repo.mkdir()
+    cache_dir = tmp_path / "cache"
+    _isolate_resolution(monkeypatch, cache_dir)
+    monkeypatch.chdir("/")
+    server = create_server(telemetry_dir=tmp_path / ".telemetry")
+    tool = _get_tool(server, "get_task_context")
+    tool.fn(task="retry", repo_root=str(repo))  # memoize repo
+    monkeypatch.chdir(non_repo)  # live signal exists, but resolves to no repo
+    result = tool.fn(task="retry")
+    assert any(item["path"] == "AGENTS.md" for item in result["relevant_docs"])
+
+
+def test_mcp_server_reloads_embedding_retriever_on_repo_switch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The cached embedding retriever must reload when the resolved repo changes.
+
+    Otherwise a new repo's task is scored against a previous repo's index — the
+    exact cross-repo contamination the report described. Embeddings deps need
+    not be installed: we stub the loader and assert the (re)load call pattern.
+    """
+    repo_a = _make_git_repo(tmp_path / "a")
+    repo_b = _make_git_repo(tmp_path / "b")
+    write_file(repo_a / "AGENTS.md", "# A\n")
+    write_file(repo_b / "AGENTS.md", "# B\n")
+    cache_dir = tmp_path / "cache"
+    _isolate_resolution(monkeypatch, cache_dir)
+    monkeypatch.chdir("/")
+
+    loaded_for: list[Path] = []
+
+    class _FakeRetriever:
+        def query_scores(self, task: str) -> dict[str, float]:
+            return {}
+
+    def fake_load(root):
+        loaded_for.append(Path(root))
+        return _FakeRetriever()
+
+    monkeypatch.setattr(mcp_server, "_try_load_embeddings", fake_load)
+
+    server = create_server(telemetry_dir=tmp_path / ".telemetry")
+    tool = _get_tool(server, "get_task_context")
+    tool.fn(task="x", repo_root=str(repo_a))
+    tool.fn(task="x", repo_root=str(repo_a))  # same repo — must NOT reload
+    tool.fn(task="x", repo_root=str(repo_b))  # switch — must reload
+
+    assert loaded_for == [repo_a.resolve(), repo_b.resolve()]
+
+
 def test_mcp_tool_accepts_per_call_repo_root(tmp_path: Path, monkeypatch) -> None:
     """A tool's repo_root arg overrides server-startup state and env signals."""
     repo = _make_git_repo(tmp_path / "per_call")
