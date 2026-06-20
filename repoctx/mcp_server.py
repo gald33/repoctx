@@ -164,10 +164,11 @@ def resolve_repo_root(explicit: str | Path | None = None) -> Path:
 
     On failure, the error message lists the most recently resolved repos so
     the model/user can pick one and pass it as ``repo_root``. The recency log
-    is also updated on every successful resolution. Within a single MCP
-    server process, callers should additionally memoize the first resolved
-    root and reuse it (see ``create_server`` — this avoids re-walking the
-    chain per tool call and prevents cross-repo drift mid-session).
+    is also updated on every successful resolution. Within a single MCP server
+    process, ``create_server`` memoizes the last resolved root and reuses it
+    only when a call carries no live signal (Claude Desktop's cwd=``/`` case);
+    a live workspace signal or an explicit ``repo_root`` re-resolves, so a
+    mid-session repo switch is never masked by a stale memo.
     """
     candidate, source = _pick_candidate(explicit)
     candidate = candidate.resolve()
@@ -189,7 +190,19 @@ def resolve_repo_root(explicit: str | Path | None = None) -> Path:
     return git_root
 
 
-def _pick_candidate(explicit: str | Path | None) -> tuple[Path, str]:
+def _live_candidate(explicit: str | Path | None) -> tuple[Path, str] | None:
+    """The first *live* repo-root signal, or ``None``.
+
+    "Live" signals, in priority order: an explicit ``--repo`` / per-call path,
+    a host workspace env var (``REPOCTX_REPO_ROOT``, ``CLAUDE_PROJECT_DIR``, …),
+    a real working directory (anything but ``/``), then ``$PWD``. The recency
+    log is deliberately excluded — it reflects *past* repos, not where the
+    caller is now, so it must never override a live signal or a session memo.
+
+    Returns ``(path, source)`` or ``None`` when nothing live points anywhere —
+    the normal case for launchd-spawned hosts (Claude Desktop: cwd ``/``, no
+    workspace env), where the session memo or an explicit arg supplies the root.
+    """
     if explicit is not None and str(explicit) not in ("", "."):
         return Path(explicit), "explicit"
     # WORKSPACE_FOLDER_PATHS can contain multiple :-separated paths; take the first.
@@ -200,8 +213,6 @@ def _pick_candidate(explicit: str | Path | None) -> tuple[Path, str]:
         first = raw.split(os.pathsep)[0].strip()
         if first:
             return Path(first), f"${var}"
-    if explicit is not None:  # e.g. explicit="." from argparse default
-        return Path(explicit), "explicit"
     cwd = Path.cwd()
     # Treat "/" as no signal — it's almost certainly a launchd-spawned host
     # with no workspace context. Try $PWD as a last live-signal attempt.
@@ -212,6 +223,15 @@ def _pick_candidate(explicit: str | Path | None) -> tuple[Path, str]:
         pwd_path = Path(pwd)
         if pwd_path.is_absolute() and pwd_path.exists():
             return pwd_path, "$PWD"
+    return None
+
+
+def _pick_candidate(explicit: str | Path | None) -> tuple[Path, str]:
+    live = _live_candidate(explicit)
+    if live is not None:
+        return live
+    if explicit is not None:  # e.g. explicit="." from argparse default
+        return Path(explicit), "explicit"
     # No live signal at all. If the recency log has exactly one live entry,
     # auto-pick it — single-repo users get zero friction. Multi-repo users
     # have >1 live entry and fall through to the error path, where they're
@@ -220,7 +240,7 @@ def _pick_candidate(explicit: str | Path | None) -> tuple[Path, str]:
     recent = _read_recent_repos()
     if len(recent) == 1:
         return recent[0], "recent (sole entry)"
-    return cwd, "cwd"
+    return Path.cwd(), "cwd"
 
 
 def _find_git_root(start: Path) -> Path | None:
@@ -262,11 +282,45 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
             root = resolve_repo_root(per_call)
             session_root = root
             return root
+        # No per-call arg. Prefer a *live* signal (host workspace env, a real
+        # cwd/$PWD, or an explicit --repo binding) over the session memo, so a
+        # mid-session repo switch is honored instead of silently serving a
+        # previously-memoized repo (the cross-repo bleed that surfaces another
+        # project's files in bundle/validate_plan). The memo is only the
+        # fallback for launchd hosts (Claude Desktop: cwd=/, no env) that carry
+        # no live signal — exactly what it was introduced for.
+        if _live_candidate(explicit_repo_root) is not None:
+            try:
+                root = resolve_repo_root(explicit_repo_root)
+            except RuntimeError:
+                # A live signal exists but doesn't resolve to a repo (e.g. the
+                # cwd moved to a non-git dir). Don't clobber a usable memo;
+                # only surface the error when nothing is memoized.
+                if session_root is not None:
+                    return session_root
+                raise
+            session_root = root
+            return root
         if session_root is not None:
             return session_root
         root = resolve_repo_root(explicit_repo_root)
         session_root = root
         return root
+
+    # Per-process embedding-retriever cache, tracked alongside the repo it was
+    # loaded for. The retriever wraps a *per-repo* on-disk index, so it must be
+    # reloaded when the resolved root changes — reusing a previous repo's
+    # retriever would score a new repo's task against the old repo's vectors
+    # (cross-repo contamination of retrieval).
+    embedding_retriever = None
+    embedding_retriever_root: Path | None = None
+
+    def _retriever_for(root: Path):
+        nonlocal embedding_retriever, embedding_retriever_root
+        if embedding_retriever is None or embedding_retriever_root != root:
+            embedding_retriever = _try_load_embeddings(root)
+            embedding_retriever_root = root
+        return embedding_retriever
 
     # Try resolving once for startup logging + embedding pre-load. Failure here
     # is non-fatal: the server still starts; per-call resolution will surface
@@ -274,7 +328,7 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
     try:
         resolved_root = _resolve()
         logger.info("repoctx MCP server rooted at %s", resolved_root)
-        embedding_retriever = _try_load_embeddings(resolved_root)
+        _retriever_for(resolved_root)
     except RuntimeError as exc:
         logger.warning(
             "repoctx MCP server starting without a resolved repo root: %s. "
@@ -282,7 +336,6 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
             exc,
         )
         resolved_root = None
-        embedding_retriever = None
 
     server = FastMCP("repoctx")
 
@@ -303,10 +356,9 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
         session_id = uuid4().hex
         task_id = uuid4().hex
 
-        # (Re)load embeddings if startup couldn't resolve a root.
-        nonlocal embedding_retriever
-        if embedding_retriever is None:
-            embedding_retriever = _try_load_embeddings(repo_root)
+        # Load embeddings for the resolved repo. Reloads on a repo switch so a
+        # task is never scored against a previously-resolved repo's index.
+        retriever = _retriever_for(repo_root)
 
         if mcp_suppression_should_short_circuit(telemetry_dir=telemetry_dir):
             stub = ContextResponse(
@@ -339,9 +391,9 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
             return payload
 
         embedding_scores: dict[str, float] | None = None
-        if embedding_retriever is not None:
+        if retriever is not None:
             try:
-                embedding_scores = embedding_retriever.query_scores(task)
+                embedding_scores = retriever.query_scores(task)
             except Exception:
                 logger.debug("Embedding scoring failed, continuing with heuristic only", exc_info=True)
 
@@ -439,8 +491,10 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
         "repo_root: Absolute path to the repo. REQUIRED on the first call of "
         "a session unless the host already supplied workspace context "
         "(Claude Desktop typically has not). Memoized for the lifetime of "
-        "this MCP server process — subsequent calls may omit it. Pass "
-        "explicitly to switch repos mid-session."
+        "this MCP server process — subsequent calls may omit it. A live "
+        "workspace signal (host env or working directory) or an explicit "
+        "repo_root always takes precedence over the memo, so switching repos "
+        "mid-session is honored and never silently serves the previous repo."
     )
 
     def _register(summary: str, fn):

@@ -6,6 +6,31 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Fixed — cross-repo identity bleed in the long-lived MCP server
+
+A single MCP server process shared across multiple repos (the common Claude
+Desktop / global-config setup) could silently answer for the *wrong* repo,
+surfacing another project's contracts, tests, and architecture docs in
+`bundle` / `validate_plan`. Root cause was identity caching in
+`repoctx/mcp_server.py`, not the on-disk embedding index — so an index
+rebuild never fixed it.
+
+- **Live signal now beats a stale session memo.** When a call omits
+  `repo_root`, resolution prefers a live workspace signal (host env, a real
+  cwd/`$PWD`, or an explicit `--repo`) over the memoized root, so a
+  mid-session repo switch is honored instead of serving the previously
+  resolved repo. The memo remains the fallback for launchd hosts (cwd `/`,
+  no workspace env) it was introduced for; a live signal that doesn't resolve
+  to a repo falls back to the memo rather than erroring.
+- **Embedding retriever reloads on a repo switch.** The cached retriever
+  wraps a per-repo index; it's now keyed to the repo it was loaded for and
+  reloaded when the resolved root changes, so a new repo's task can never be
+  scored against a previous repo's vectors.
+- Why `risk_report` looked "clean" while `validate_plan` didn't: both build
+  the same bundle, but `risk_report` only emits notes when your
+  `changed_files` intersect the (foreign) constraints/protected paths, while
+  `validate_plan` echoes the bundle's `validation_plan.tests` unconditionally.
+
 ## [1.6.0] — 2026-06-19
 
 ### Added — cloud-session setup (Claude Code on the web, Codex)
