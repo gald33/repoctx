@@ -1,4 +1,5 @@
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -488,3 +489,186 @@ def test_mcp_server_ignores_telemetry_write_failures(tmp_repo: Path, monkeypatch
     result = tool.fn(task="retry")
 
     assert any(item["path"] == "AGENTS.md" for item in result["relevant_docs"])
+
+
+# ---------------------------------------------------------------------------
+# Non-blocking MCP startup (background embedding warm-up).
+#
+# Regression for the cold-start handshake timeout: loading the
+# Qwen3-Embedding-0.6B weights can take >60s on a cold CPU host. Doing that
+# synchronously inside create_server() (the <=1.5.1 behavior) stalled the MCP
+# `initialize` handshake past the client's ~60s per-request timeout — the
+# connection failed with "MCP error -32001: Request timed out" and no tools
+# ever registered. create_server() must instead warm the retriever off the
+# startup path (a background "repoctx-embed-warm" daemon thread) so `initialize`
+# / list_tools are answered immediately, with the first tool call driving the
+# load to completion at most once.
+#
+# These tests prove non-blocking via a stub + thread-name assertion, NOT
+# wall-clock timing: a blocking/instrumented fake loader records which thread
+# called it and how many times.
+# ---------------------------------------------------------------------------
+
+
+class _FakeRetriever:
+    """Stand-in for the embedding retriever; records query_scores calls."""
+
+    def __init__(self, scores: dict[str, float] | None = None) -> None:
+        self._scores = scores or {}
+        self.queries: list[str] = []
+
+    def query_scores(self, task: str) -> dict[str, float]:
+        self.queries.append(task)
+        return dict(self._scores)
+
+
+def test_create_server_warms_embeddings_off_the_startup_path(
+    tmp_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """create_server() must return and answer list_tools WITHOUT the slow loader
+    having completed — the load runs on the background warm-up thread, not the
+    caller's. This is the core non-blocking guarantee that keeps the MCP
+    `initialize` handshake under the client timeout even when the model load
+    blocks. Fails against the pre-1.6.0 synchronous create_server()."""
+    write_file(tmp_repo / "AGENTS.md", "# Repo guidance\n")
+    monkeypatch.delenv("REPOCTX_EAGER_EMBEDDINGS", raising=False)
+
+    gate = threading.Event()  # the test releases the loader
+    entered = threading.Event()  # the loader signals it has started
+    completed = threading.Event()  # the loader signals it has finished
+    calls: list[str] = []  # thread name per loader invocation
+
+    def blocking_load(root: Path):
+        calls.append(threading.current_thread().name)
+        entered.set()
+        gate.wait(timeout=10)  # block so the load is provably in-flight
+        completed.set()
+        return _FakeRetriever({"AGENTS.md": 0.99})
+
+    monkeypatch.setattr(mcp_server, "_try_load_embeddings", blocking_load)
+
+    caller_thread = threading.current_thread().name
+    # Must return promptly even though the loader is blocked.
+    server = create_server(repo_root=tmp_repo)
+
+    # The loader started on the dedicated warm-up thread, not the caller's.
+    assert entered.wait(timeout=10), "background embedding warm-up never started"
+    assert calls == ["repoctx-embed-warm"]
+    assert caller_thread != "repoctx-embed-warm"
+
+    # The server answers tool discovery while the loader is STILL blocked —
+    # i.e. startup did not wait for the (slow) load. This is the assertion that
+    # would fail if create_server() loaded synchronously.
+    assert not completed.is_set()
+    names = {t.name for t in server._tool_manager.list_tools()}
+    assert "get_task_context" in names
+    assert not completed.is_set()
+
+    gate.set()  # release the daemon thread so it can exit cleanly
+
+
+def test_first_get_task_context_call_loads_and_uses_embeddings(
+    tmp_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first get_task_context call drives _ensure_embeddings to completion
+    and ranks results with the loaded retriever's scores. A file with no lexical
+    overlap with the task can only surface via its embedding score, so its
+    presence proves the loaded retriever was actually consumed."""
+    write_file(tmp_repo / "AGENTS.md", "# Repo guidance\n")
+    # No lexical overlap with the task below.
+    write_file(tmp_repo / "src" / "zzz_unrelated.py", "def helper():\n    return 1\n")
+    monkeypatch.delenv("REPOCTX_EAGER_EMBEDDINGS", raising=False)
+
+    retriever = _FakeRetriever({"src/zzz_unrelated.py": 0.99})
+    load_threads: list[str] = []
+
+    def fake_load(root: Path):
+        load_threads.append(threading.current_thread().name)
+        return retriever
+
+    monkeypatch.setattr(mcp_server, "_try_load_embeddings", fake_load)
+
+    server = create_server(repo_root=tmp_repo, telemetry_dir=tmp_repo / ".telemetry")
+    tool = _get_tool(server, "get_task_context")
+    result = tool.fn(task="quux frobnicate widget")
+
+    # The loaded retriever scored the task...
+    assert retriever.queries == ["quux frobnicate widget"]
+    # ...and its score surfaced an otherwise-irrelevant file (embedding-ranked).
+    assert any(f["path"] == "src/zzz_unrelated.py" for f in result["relevant_files"])
+    # Loaded at most once across the warm-up thread + this call.
+    assert len(load_threads) == 1
+
+
+def test_embedding_loader_runs_at_most_once_under_concurrent_first_calls(
+    tmp_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stampede of concurrent first calls (plus the background warm-up thread)
+    must collapse to a single slow load — the load is idempotent / single-
+    flighted, never duplicated."""
+    write_file(tmp_repo / "AGENTS.md", "# Repo guidance\n")
+    monkeypatch.delenv("REPOCTX_EAGER_EMBEDDINGS", raising=False)
+
+    gate = threading.Event()
+    entered = threading.Event()
+    count_lock = threading.Lock()
+    load_count = 0
+
+    def slow_load(root: Path):
+        nonlocal load_count
+        with count_lock:
+            load_count += 1
+        entered.set()
+        gate.wait(timeout=10)  # hold the load open so callers pile up behind it
+        return _FakeRetriever()
+
+    monkeypatch.setattr(mcp_server, "_try_load_embeddings", slow_load)
+
+    server = create_server(repo_root=tmp_repo, telemetry_dir=tmp_repo / ".telemetry")
+    tool = _get_tool(server, "get_task_context")
+
+    results: list[object] = []
+    results_lock = threading.Lock()
+
+    def call() -> None:
+        res = tool.fn(task="retry")
+        with results_lock:
+            results.append(res)
+
+    threads = [threading.Thread(target=call) for _ in range(6)]
+    for t in threads:
+        t.start()
+    # Wait until a load is provably in-flight, then release everyone at once.
+    assert entered.wait(timeout=10)
+    gate.set()
+    for t in threads:
+        t.join(timeout=15)
+
+    assert all(not t.is_alive() for t in threads)
+    assert len(results) == 6
+    assert load_count == 1  # one load despite 6 concurrent callers + warm-up
+
+
+def test_eager_embeddings_preloads_on_calling_thread(
+    tmp_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REPOCTX_EAGER_EMBEDDINGS=1 restores the legacy blocking preload: the
+    loader runs on the calling thread before create_server() returns, never on
+    the background warm-up thread (the escape hatch still works)."""
+    write_file(tmp_repo / "AGENTS.md", "# Repo guidance\n")
+    monkeypatch.setenv("REPOCTX_EAGER_EMBEDDINGS", "1")
+
+    calls: list[str] = []
+
+    def fake_load(root: Path):
+        calls.append(threading.current_thread().name)
+        return _FakeRetriever()
+
+    monkeypatch.setattr(mcp_server, "_try_load_embeddings", fake_load)
+
+    caller_thread = threading.current_thread().name
+    create_server(repo_root=tmp_repo)
+
+    # Loaded synchronously, on the caller's thread, before create_server returned.
+    assert calls == [caller_thread]
+    assert "repoctx-embed-warm" not in calls

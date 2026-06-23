@@ -2,6 +2,7 @@ import argparse
 import json
 import logging
 import os
+import threading
 from pathlib import Path
 from time import perf_counter
 from uuid import uuid4
@@ -307,28 +308,80 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
         session_root = root
         return root
 
-    # Per-process embedding-retriever cache, tracked alongside the repo it was
-    # loaded for. The retriever wraps a *per-repo* on-disk index, so it must be
+    # Per-process embedding-retriever cache, keyed to the repo it was loaded
+    # for. The retriever wraps a *per-repo* on-disk index, so it must be
     # reloaded when the resolved root changes — reusing a previous repo's
     # retriever would score a new repo's task against the old repo's vectors
     # (cross-repo contamination of retrieval).
+    #
+    # CRITICAL: the model load behind this (sentence-transformers weights for
+    # Qwen3-Embedding-0.6B) can take >60s on a cold CPU host, so it MUST stay
+    # off the startup path. Loading it inline before the server serves would
+    # stall the MCP `initialize` handshake past the client's ~60s per-request
+    # timeout — the connection then fails with "MCP error -32001: Request timed
+    # out" and no tools ever register (reproduced reliably in cloud sessions).
+    # The load is single-flighted behind a lock + completion event: the
+    # background warm-up thread (or the first tool call, whichever runs first)
+    # performs it exactly once, and concurrent callers wait on the event instead
+    # of kicking off a duplicate load. A non-None retriever is cached; a None
+    # result (no index yet, deps missing) is cheap and re-attempted so a
+    # mid-session `index` build is picked up.
     embedding_retriever = None
     embedding_retriever_root: Path | None = None
+    embed_lock = threading.Lock()
+    embed_inflight_root: Path | None = None  # repo whose load is in flight, or None
+    embed_done = threading.Event()  # pulsed when an in-flight load finishes
 
-    def _retriever_for(root: Path):
-        nonlocal embedding_retriever, embedding_retriever_root
-        if embedding_retriever is None or embedding_retriever_root != root:
-            embedding_retriever = _try_load_embeddings(root)
-            embedding_retriever_root = root
-        return embedding_retriever
+    def _ensure_embeddings(root: Path):
+        """Return the embedding retriever for ``root``, loading it at most once.
 
-    # Try resolving once for startup logging + embedding pre-load. Failure here
-    # is non-fatal: the server still starts; per-call resolution will surface
-    # actionable errors to the user.
+        Thread-safe and idempotent. The (slow) model load is single-flighted so
+        a stampede of first tool calls — and the background warm-up thread —
+        collapse to ONE load; concurrent callers wait on ``embed_done`` rather
+        than starting their own. A different ``root`` reloads (the retriever
+        wraps a per-repo index). Invoked both from the warm-up thread at startup
+        and synchronously from the first tool call.
+        """
+        nonlocal embedding_retriever, embedding_retriever_root, embed_inflight_root
+        while True:
+            with embed_lock:
+                if embedding_retriever is not None and embedding_retriever_root == root:
+                    return embedding_retriever
+                if embed_inflight_root is None:
+                    # Claim the load for this repo.
+                    embed_inflight_root = root
+                    embed_done.clear()
+                    owner = True
+                else:
+                    # Another load is already running; wait for it to finish,
+                    # then re-check (it may have produced what we need).
+                    owner = False
+            if not owner:
+                embed_done.wait()
+                continue
+            # We own the load. Run it OUTSIDE the lock so the (multi-second)
+            # model load never serializes other callers; ``embed_done``
+            # coordinates anyone waiting on this same load. The finally clause
+            # guarantees the event is pulsed even if the load raises, so a
+            # waiter can never hang.
+            retriever = None
+            try:
+                retriever = _try_load_embeddings(root)
+            finally:
+                with embed_lock:
+                    if retriever is not None:
+                        embedding_retriever = retriever
+                        embedding_retriever_root = root
+                    embed_inflight_root = None
+                    embed_done.set()
+            return retriever
+
+    # Resolve once for startup logging + embedding warm-up. Failure here is
+    # non-fatal: the server still starts; per-call resolution surfaces
+    # actionable errors at invocation time.
     try:
         resolved_root = _resolve()
         logger.info("repoctx MCP server rooted at %s", resolved_root)
-        _retriever_for(resolved_root)
     except RuntimeError as exc:
         logger.warning(
             "repoctx MCP server starting without a resolved repo root: %s. "
@@ -336,6 +389,23 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
             exc,
         )
         resolved_root = None
+
+    # Warm the embedding retriever WITHOUT blocking startup. By default the load
+    # runs in a background daemon thread so `initialize` is answered immediately
+    # and the first tool call falls back to the synchronous, at-most-once
+    # `_ensure_embeddings` path. REPOCTX_EAGER_EMBEDDINGS=1 restores the legacy
+    # blocking preload (load on the calling thread before create_server returns)
+    # for callers that would rather pay — and surface — the cost up front.
+    if resolved_root is not None:
+        if _eager_embeddings_enabled():
+            _ensure_embeddings(resolved_root)
+        else:
+            threading.Thread(
+                target=_ensure_embeddings,
+                args=(resolved_root,),
+                name="repoctx-embed-warm",
+                daemon=True,
+            ).start()
 
     server = FastMCP("repoctx")
 
@@ -357,8 +427,10 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
         task_id = uuid4().hex
 
         # Load embeddings for the resolved repo. Reloads on a repo switch so a
-        # task is never scored against a previously-resolved repo's index.
-        retriever = _retriever_for(repo_root)
+        # task is never scored against a previously-resolved repo's index. If
+        # the background warm-up hasn't finished, this drives the load to
+        # completion (at most once) rather than blocking server startup.
+        retriever = _ensure_embeddings(repo_root)
 
         if mcp_suppression_should_short_circuit(telemetry_dir=telemetry_dir):
             stub = ContextResponse(
@@ -952,6 +1024,22 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
         }
 
     return server
+
+
+def _eager_embeddings_enabled() -> bool:
+    """Whether to preload embeddings on the startup (calling) thread.
+
+    Default off: the embedding model load (>60s on a cold CPU host) is warmed
+    in a background daemon thread so the MCP ``initialize`` handshake is never
+    blocked. Set ``REPOCTX_EAGER_EMBEDDINGS=1`` (or ``true``/``yes``/``on``) to
+    restore the legacy blocking preload.
+    """
+    return os.environ.get("REPOCTX_EAGER_EMBEDDINGS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _try_load_embeddings(repo_root: Path):
