@@ -6,6 +6,25 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Fixed — MCP `initialize` handshake timed out during the cold embedding load
+
+On a cold CPU host, loading the Qwen3-Embedding-0.6B weights can take >60s.
+That load ran synchronously inside `create_server()` *before* the server
+started serving, so the MCP `initialize` handshake couldn't be answered until
+it finished — exceeding the client's ~60s per-request timeout. The connection
+then failed with `MCP error -32001: Request timed out` and no tools ever
+registered (reproduced reliably in Claude Code cloud sessions).
+
+- **Embedding warm-up is now off the startup path.** `create_server()` warms
+  the retriever in a background daemon thread (`repoctx-embed-warm`), so
+  `initialize` / `tools/list` are answered immediately. The first tool call
+  drives the load to completion via a thread-safe, load-at-most-once helper
+  (a lock + completion event single-flights the model load), so a stampede of
+  concurrent first calls — and the warm-up thread — collapse to one load.
+- **Escape hatch.** `REPOCTX_EAGER_EMBEDDINGS=1` restores the legacy blocking
+  preload (load on the startup thread before the server serves).
+- No behavior change for normal users; embedding-ranked results are unchanged.
+
 ### Fixed — cross-repo identity bleed in the long-lived MCP server
 
 A single MCP server process shared across multiple repos (the common Claude

@@ -338,6 +338,9 @@ Default `embedding_weight` is 12.0. Files with cosine similarity above 0.3 bypas
 | `REPOCTX_BASE_FETCH_TTL_SECONDS` | `1800` | How often the read path may `git fetch origin main` |
 | `REPOCTX_BASE_REFRESH_ON_READ` | `1` | `0` = warn-only on origin/main drift (no on-read re-embed) |
 | `REPOCTX_OVERLAY_WORKTREE` | `1` | `0` = retrieval reflects pure origin/main (no worktree overlay) |
+| `REPOCTX_EAGER_EMBEDDINGS` | `0` | `1` = block MCP startup on the embedding model load instead of warming it in the background (see below) |
+
+> **MCP startup is non-blocking.** Loading the embedding model can take >60s on a cold CPU host. The MCP server warms it in a background daemon thread (`repoctx-embed-warm`) so the `initialize` handshake is answered immediately — otherwise the load would exceed the client's ~60s per-request timeout and the connection would fail with `MCP error -32001: Request timed out` before any tools register. The first tool call drives the load to completion (at most once) if the warm-up hasn't finished, then ranks with embeddings as usual. Set `REPOCTX_EAGER_EMBEDDINGS=1` to restore the legacy blocking preload (load on the startup thread before the server serves) — useful for a long-lived local server where you'd rather pay, and surface, the cost up front so the first query never waits.
 
 > **Apple silicon (MPS):** indexing handles GPU memory automatically (fp16, `max_seq_length=256`, batch clamped to 8, cache eviction between super-batches). Catchable encode errors fall back to CPU transparently. The rare uncatchable Metal C++ assertion still requires `REPOCTX_EMBEDDING_DEVICE=cpu repoctx index`.
 
