@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "repoctx": {
+      "command": "${CLAUDE_PROJECT_DIR}/scripts/repoctx-py.sh",
+      "args": [
+        "-m",
+        "repoctx.mcp_server",
+        "--repo",
+        "${CLAUDE_PROJECT_DIR}"
+      ]
+    }
+  }
+}
