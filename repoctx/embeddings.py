@@ -41,6 +41,42 @@ except ImportError:
     HAS_EMBEDDINGS = False
 
 
+def refresh_embeddings_availability() -> bool:
+    """Re-probe the optional embedding deps after a runtime install.
+
+    ``HAS_EMBEDDINGS`` is evaluated once at import — correct for a static
+    environment, wrong once autoprovisioning pip-installs the ``[embeddings]``
+    extra *into the running process's env* mid-session. This re-runs the probe
+    and flips the module globals in place. Safe because every consumer imports
+    the flag inside a function (re-read per call), not at module top level;
+    ``vector_index`` keeps its own numpy globals, refreshed here too.
+
+    Returns the (possibly updated) availability. Never raises.
+    """
+    global SentenceTransformer, _np, HAS_EMBEDDINGS
+    if HAS_EMBEDDINGS:
+        return True
+    import importlib
+
+    importlib.invalidate_caches()
+    try:
+        from sentence_transformers import SentenceTransformer as _st
+        import numpy as _numpy
+    except ImportError:
+        return False
+    SentenceTransformer = _st
+    _np = _numpy
+    HAS_EMBEDDINGS = True
+    try:
+        from repoctx import vector_index as _vi
+
+        _vi._np = _numpy
+        _vi.HAS_NUMPY = True
+    except Exception:  # noqa: BLE001 — availability refresh must never raise
+        logger.debug("vector_index numpy refresh failed", exc_info=True)
+    return True
+
+
 def build_enriched_text(record: FileRecord, max_content_chars: int = 8000) -> str:
     """Construct metadata-enriched text for embedding a file record.
 
@@ -370,12 +406,14 @@ def load_retriever_status(
     """
     canonical = str(shared_embeddings_dir(repo_root, config))
     repo = str(Path(repo_root).resolve())
+    note = _autoprovision_note(repo_root)
     if not HAS_EMBEDDINGS:
         return RetrieverStatus(
             None,
             STATUS_DEPS_MISSING,
             "Embedding dependencies are not installed, so retrieval is "
-            "lexical-only. Install with: pip install 'repoctx-mcp[embeddings]'.",
+            "lexical-only. Install with: pip install 'repoctx-mcp[embeddings]'."
+            + note,
             canonical,
         )
     try:
@@ -390,7 +428,8 @@ def load_retriever_status(
                 STATUS_NO_INDEX,
                 f"No embedding index for {repo}; retrieval is lexical-only. "
                 f"Build the shared index with `repoctx index` (it lives at "
-                f"{canonical} and is reused by every worktree of this repo).",
+                f"{canonical} and is reused by every worktree of this repo)."
+                + note,
                 canonical,
             )
         except IndexSchemaMismatch as exc:
@@ -433,11 +472,13 @@ def probe_index_status(
 
     canonical = str(shared_embeddings_dir(repo_root, config))
     repo = str(Path(repo_root).resolve())
+    note = _autoprovision_note(repo_root)
     if not HAS_EMBEDDINGS:
         return RetrieverStatus(
             None, STATUS_DEPS_MISSING,
             "Embedding dependencies are not installed, so retrieval is "
-            "lexical-only. Install with: pip install 'repoctx-mcp[embeddings]'.",
+            "lexical-only. Install with: pip install 'repoctx-mcp[embeddings]'."
+            + note,
             canonical,
         )
     index_dir = resolve_embeddings_dir(repo_root, config)
@@ -446,7 +487,8 @@ def probe_index_status(
             None, STATUS_NO_INDEX,
             f"No embedding index for {repo}; retrieval is lexical-only. "
             f"Build the shared index with `repoctx index` (it lives at "
-            f"{canonical} and is reused by every worktree of this repo).",
+            f"{canonical} and is reused by every worktree of this repo)."
+            + note,
             canonical,
         )
     from repoctx.vector_index import SCHEMA_VERSION
@@ -465,6 +507,22 @@ def probe_index_status(
             canonical,
         )
     return RetrieverStatus(None, STATUS_OK, "", canonical)
+
+
+def _autoprovision_note(repo_root: str | Path) -> str:
+    """Status suffix when background auto-provisioning is active or failed.
+
+    Turns the "install it yourself" guidance above into "it's already being
+    handled" while the autoprovision thread works, so an agent reading the
+    bundle warning doesn't chase a manual fix mid-provision. Empty string when
+    no provisioning state exists. Never raises.
+    """
+    try:
+        from repoctx.autoprovision import provisioning_note
+
+        return provisioning_note(repo_root)
+    except Exception:  # noqa: BLE001 — status text must never break retrieval
+        return ""
 
 
 def try_load_retriever(

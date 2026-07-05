@@ -160,20 +160,36 @@ SessionStart hooks are deliberately **not** part of this layer: hosts don't
 guarantee hooks finish before MCP servers launch, so "the hook will have
 installed it by then" is a race the command itself must not depend on.
 
-### Layer 2 — semantic retrieval (opt-in, via the environment setup script)
+### Layer 2 — semantic retrieval (automatic in remote sessions)
 
 Embeddings need the `[embeddings]` extra, the ~1.2 GB Qwen3 model, and an
-index — too heavy for connection time. Put it in the cloud environment's
-**setup script** (the "Setup script" field in Claude Code on the web), which
-runs before the session and is cached:
+index — too heavy for connection time, so the server **provisions them
+itself, in the background, while already serving**. In a remote container
+(`CLAUDE_CODE_REMOTE=true`, or `REPOCTX_AUTO_EMBEDDINGS=1` anywhere) the
+first tool call kicks a daemon thread that:
+
+1. installs `repoctx-mcp[embeddings]` into the server's own environment
+   (via `uv pip` when available — works inside uv's ephemeral envs and
+   sidesteps PEP 668 — else `pip`; torch resolves from the CPU wheel index);
+2. records index consent as granted (the container is disposable; a
+   previously **declined** consent is always respected and stops the run);
+3. builds/refreshes the `origin/main` index.
+
+Until it finishes, retrieval is lexical-only and every bundle's `warnings[]`
+says provisioning is underway ("no action needed"); the next tool call after
+completion serves semantic results — nothing restarts. Progress is journaled
+to `<git-common-dir>/repoctx/state/autoprovision.json`. Kill switch:
+`REPOCTX_AUTO_EMBEDDINGS=0`.
+
+**Optional fast path:** provisioning costs a few cold minutes once per
+container cache. To have semantic retrieval ready at session start instead,
+put the same work in the cloud environment's **setup script** (the "Setup
+script" field in Claude Code on the web), which runs before the session and
+is cached:
 
 - this repo: `bash scripts/cloud-setup.sh`
-- a repo that *uses* RepoCtx:
-  `pip install "repoctx-mcp[embeddings]" && repoctx index --refresh`
-
-The `SessionStart` hook in this repo is only a sub-second presence check that
-prints a pointer at the setup script when the stack is missing — it never
-installs inline.
+- a repo that *uses* RepoCtx: `repoctx autoprovision`
+  (or `pip install "repoctx-mcp[embeddings]" && repoctx index --refresh`)
 
 > **Network policy.** Layer 1 needs egress to PyPI (or a warm container);
 > layer 2 additionally needs huggingface.co (model). If policy blocks them,

@@ -6,6 +6,43 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added — semantic retrieval provisions itself in remote sessions (zero setup)
+
+Connecting was only half the cloud story: without a per-environment setup
+script, remote sessions ran lexical-only forever — the `[embeddings]` extra,
+the embedding model, and the index never existed in the fresh container. Now
+the MCP server provisions all three itself, in the background, while already
+serving:
+
+- **`repoctx/autoprovision.py`.** In a remote container
+  (`CLAUDE_CODE_REMOTE=true`; `REPOCTX_AUTO_EMBEDDINGS=1` forces on anywhere,
+  `=0` is the kill switch) the first tool call spawns a daemon thread that
+  installs `repoctx-mcp[embeddings]` into the *running* interpreter's
+  environment (`uv pip --python <this interpreter>` when uv is available —
+  works inside uv ephemeral envs, immune to PEP 668 — else `pip`; torch
+  resolves from the CPU wheel index), then builds/refreshes the origin/main
+  index. Single-flighted in-process, journaled cross-process to
+  `<state>/autoprovision.json` with a staleness window so a crashed run never
+  blocks retries.
+- **Mid-session activation.** `embeddings.refresh_embeddings_availability()`
+  re-probes the optional deps after the runtime install and flips the
+  import-time `HAS_EMBEDDINGS` / `vector_index.HAS_NUMPY` globals in place, so
+  the very next tool call serves semantic results — no server restart. (Every
+  consumer already reads these flags per call, not at module import.)
+- **Consent stays honest.** A recorded `"declined"` index consent always stops
+  provisioning. Otherwise, in remote containers consent is recorded as
+  granted (with an `autoprovision`-surface telemetry event) before the build —
+  the one-shot consent prompt was designed for local machines, where the
+  download/disk cost lands on the user's own hardware.
+- **Status is loud, not silent.** While provisioning runs, the
+  `no_index`/`deps_missing` warning on bundles and `semantic_search` says
+  semantic retrieval "is being provisioned automatically … no action needed";
+  a failed run surfaces the error and the manual fix.
+- **`repoctx autoprovision` CLI** runs the same sequence synchronously — the
+  one-liner for cloud environment setup scripts (the pre-warmed fast path,
+  since a cold in-session provision costs a few minutes once per container
+  cache).
+
 ### Fixed — committed MCP configs were machine-pinned, so cloud sessions (and teammates) could never connect
 
 `repoctx install` wrote the installing machine's absolute interpreter path and
