@@ -332,6 +332,21 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
     embed_inflight_root: Path | None = None  # repo whose load is in flight, or None
     embed_done = threading.Event()  # pulsed when an in-flight load finishes
 
+    def _maybe_autoprovision(root: Path) -> None:
+        """Kick zero-setup background provisioning of semantic retrieval.
+
+        No-op outside remote containers (env-gated), after the first call for
+        a root, and when everything is already live — cheap enough for hot
+        paths. Called from ``_ensure_embeddings`` (so the startup warm thread
+        triggers it before the first tool call) and from ``_run_op``.
+        """
+        try:
+            from repoctx.autoprovision import maybe_start_auto_provision
+
+            maybe_start_auto_provision(root, telemetry_dir=telemetry_dir)
+        except Exception:  # noqa: BLE001 — provisioning must never break serving
+            logger.debug("autoprovision kick failed", exc_info=True)
+
     def _ensure_embeddings(root: Path):
         """Return the embedding retriever for ``root``, loading it at most once.
 
@@ -343,6 +358,7 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
         and synchronously from the first tool call.
         """
         nonlocal embedding_retriever, embedding_retriever_root, embed_inflight_root
+        _maybe_autoprovision(root)
         while True:
             with embed_lock:
                 if embedding_retriever is not None and embedding_retriever_root == root:
@@ -516,6 +532,7 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
     from repoctx.telemetry import record_protocol_op
 
     def _run_op(op_name: str, task: str, root: Path, fn):
+        _maybe_autoprovision(root)
         started = perf_counter()
         sess = uuid4().hex
         tid = uuid4().hex

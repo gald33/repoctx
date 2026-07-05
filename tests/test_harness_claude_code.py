@@ -119,6 +119,90 @@ def test_installer_agents_section_includes_upkeep(tmp_path: Path) -> None:
     assert "repoctx update" in text
 
 
+# -- portable, self-bootstrapping MCP config ----------------------------------
+
+
+def test_mcp_config_is_machine_portable(tmp_path: Path) -> None:
+    """The committed .mcp.json must work on machines the installer never saw:
+    no repo-absolute --repo pin, a POSIX bootstrap chain that tries local
+    interpreters, then uv, then pip."""
+    import shlex
+    import sys
+
+    install_claude_code(tmp_path)
+    entry = json.loads((tmp_path / ".mcp.json").read_text())["mcpServers"]["repoctx"]
+    assert entry["command"] == "sh"
+    flag, script = entry["args"]
+    assert flag == "-c"
+    # Pinned interpreter is probed first (exists-tested, so harmless elsewhere).
+    assert shlex.quote(sys.executable) in script
+    # Cold-container fallbacks, in order.
+    assert "uv run --no-project --with repoctx-mcp" in script
+    assert "pip install" in script
+    # The probe must require the mcp package too — repoctx.mcp_server imports
+    # without it but create_server() then dies.
+    assert "import mcp.server.fastmcp, repoctx.mcp_server" in script
+    # No machine-specific repo pin anywhere.
+    assert "--repo" not in script
+    assert str(tmp_path) not in script
+
+
+def test_mcp_config_upgrades_legacy_pinned_entry(tmp_path: Path) -> None:
+    """Pre-1.7 installs pinned the installer's interpreter + --repo; a re-run
+    must rewrite that to the portable form (and then be idempotent)."""
+    import sys
+
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "repoctx": {
+                        "command": sys.executable,
+                        "args": ["-m", "repoctx.mcp_server", "--repo", str(tmp_path)],
+                    }
+                }
+            }
+        )
+    )
+    first = install_claude_code(tmp_path)
+    assert first.mcp_config_changed
+    entry = json.loads((tmp_path / ".mcp.json").read_text())["mcpServers"]["repoctx"]
+    assert entry["command"] == "sh"
+    second = install_claude_code(tmp_path)
+    assert not second.mcp_config_changed
+
+
+def test_mcp_config_windows_keeps_pinned_form(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No POSIX shell on native Windows → keep the single pinned command."""
+    import sys
+
+    from repoctx.harness import claude_code as cc
+
+    monkeypatch.setattr(cc, "_is_windows", lambda: True)
+    install_claude_code(tmp_path)
+    entry = json.loads((tmp_path / ".mcp.json").read_text())["mcpServers"]["repoctx"]
+    assert entry == {"command": sys.executable, "args": ["-m", "repoctx.mcp_server"]}
+
+
+def test_hook_commands_fall_back_and_never_fail(tmp_path: Path) -> None:
+    """Hook commands are committed too: on a machine without repoctx they must
+    silently no-op (`|| true`), not error on every prompt/edit/stop."""
+    install_claude_code(tmp_path)
+    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+    all_cmds = [
+        h.get("command", "")
+        for entries in settings["hooks"].values()
+        for entry in entries
+        for h in (entry.get("hooks") or [])
+    ]
+    assert all_cmds
+    for cmd in all_cmds:
+        assert "|| true" in cmd
+        assert "python3 -m repoctx" in cmd  # PATH fallback between pin and true
+
+
 # -- _classify_md --------------------------------------------------------------
 
 

@@ -34,11 +34,14 @@ if python3 -c "import importlib.util as u, sys; sys.exit(0 if u.find_spec('repoc
   exit 0
 fi
 
-# Stack missing → the environment setup script wasn't configured. Start the
-# session anyway (repoctx degrades to lexical retrieval) and say how to enable
-# semantic retrieval next time, instead of blocking init with an inline install.
-echo "repoctx: embedding stack not installed — retrieval is lexical-only this" \
-     "session. Set this environment's setup script to 'bash scripts/cloud-setup.sh'" \
-     "so packages + model + index are prepared once (cached) BEFORE the session" \
-     "starts, instead of blocking session initialization." 1>&2
+# Stack missing → the environment setup script wasn't configured. That's fine:
+# the MCP server auto-provisions semantic retrieval in a background thread
+# (install deps into its own env + model download + index build) the moment it
+# starts serving in a remote session — retrieval is lexical-only until that
+# completes, then upgrades mid-session. The setup script remains the FAST path
+# (everything pre-cached before the session), so still point at it.
+echo "repoctx: embedding stack not installed — starting lexical-only;" \
+     "semantic retrieval is being provisioned automatically in the background" \
+     "and will activate mid-session. To have it ready at session start instead," \
+     "set this environment's setup script to 'bash scripts/cloud-setup.sh'." 1>&2
 exit 0

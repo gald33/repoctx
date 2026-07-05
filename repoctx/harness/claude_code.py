@@ -90,24 +90,103 @@ TOOL_USE_HOOK_MATCHER = "Read|Edit|Write|MultiEdit"
 TOOL_USE_HOOK_COMMAND = "repoctx hook tool-use"
 
 
-def _resolve_repoctx_invocation(suffix: str) -> str:
-    """Build a shell command that runs ``repoctx <suffix>`` via the interpreter
-    that ran ``repoctx install``.
+def _is_windows() -> bool:
+    return os.name == "nt"
 
-    Why: hooks and the MCP server are launched by Claude Code (or another
-    host) via the user's shell, whose PATH may not include the venv where
-    ``repoctx`` was installed. Pinning to ``sys.executable`` makes the
-    install self-contained regardless of how the user installed (venv,
-    pipx, uv tool, system pip).
+
+def _resolve_repoctx_invocation(suffix: str) -> str:
+    """Build a shell command that runs ``repoctx <suffix>``, portably.
+
+    Hooks are launched by Claude Code via the shell, and the settings file
+    they live in is committed and shared across machines (including cloud
+    containers cloned fresh). Two machines rarely agree on where repoctx is
+    installed, so the command tries, in order:
+
+    1. the interpreter that ran ``repoctx install`` (exact venv fidelity on
+       the machine that installed — its absolute path simply doesn't exist
+       elsewhere and the shell falls through),
+    2. ``python3`` from PATH (system installs; cloud containers where a
+       setup script installed the package),
+    3. ``|| true`` — a machine with no repoctx at all must not turn every
+       prompt/edit/stop into a hook error.
+
+    stderr is suppressed on the probes so machines without repoctx don't
+    spray "command not found" into the hook log; hook *stdout* (the nudge
+    text) flows through untouched. Each fallback only runs when the prior
+    command failed before consuming stdin (interpreter missing or module
+    not found), so the hook JSON is still readable by whichever attempt
+    actually runs.
 
     ``suffix`` must start with ``repoctx ``; we strip the leading word and
     invoke ``-m repoctx`` so the same constants stay legible to anyone
-    reading ``.claude/settings.json``.
+    reading ``.claude/settings.json``. On Windows the pinned single-command
+    form is kept (no POSIX shell semantics to build on).
     """
     if not suffix.startswith("repoctx "):
         raise ValueError(f"repoctx invocation must start with 'repoctx ': {suffix!r}")
     args = suffix[len("repoctx "):]
-    return f"{shlex.quote(sys.executable)} -m repoctx {args}"
+    pinned = shlex.quote(sys.executable)
+    if _is_windows():
+        return f"{pinned} -m repoctx {args}"
+    return (
+        f"{pinned} -m repoctx {args} 2>/dev/null"
+        f" || python3 -m repoctx {args} 2>/dev/null"
+        f" || true"
+    )
+
+
+def portable_mcp_server_config() -> dict[str, object]:
+    """MCP server entry that works on machines the installer never saw.
+
+    The file this lands in (``.mcp.json`` / ``.cursor/mcp.json`` /
+    ``.codex/mcp.json``) is committed and travels with the repo — to
+    teammates' machines and to cloud sessions (Claude Code on the web,
+    Codex cloud), where the container is cloned fresh and has neither the
+    installer's interpreter path nor, on a cold start, the package. A
+    pinned absolute interpreter (the pre-1.7 form) can never spawn there,
+    and SessionStart hooks are NOT guaranteed to finish before the host
+    launches MCP servers, so "the hook will have pip-installed it by then"
+    is a race. The command must therefore bootstrap itself:
+
+    1. Try interpreters that already have the server (the pinned
+       install-time interpreter first — exact venv fidelity locally, and
+       ``/usr/local/bin/python3`` is the standard path in cloud images —
+       then ``python3``/``python`` from PATH). Probing
+       ``mcp.server.fastmcp`` too matters: ``repoctx.mcp_server`` imports
+       fine without the ``mcp`` package but dies at ``create_server()``.
+    2. Fall back to ``uv run --no-project --with repoctx-mcp`` — resolves
+       the published package into a cached ephemeral env in seconds, no
+       system mutation, immune to PEP 668. ``uv`` ships preinstalled in
+       Claude Code cloud images, so this is the rung cold containers hit.
+    3. Last resort: ``pip install`` into ``python3`` (quiet, stdout
+       redirected to stderr so MCP stdio framing stays clean), then exec.
+
+    No ``--repo`` pin: the host launches project-scoped servers with cwd at
+    the project root, which repo-root resolution prefers as a live signal —
+    a committed absolute path would just re-break portability. On Windows
+    there's no POSIX shell to chain with; the pinned form is kept (that
+    file was machine-specific before this function existed, too).
+    """
+    if _is_windows():
+        return {"command": sys.executable, "args": ["-m", "repoctx.mcp_server"]}
+    pinned = shlex.quote(sys.executable)
+    probe = "import mcp.server.fastmcp, repoctx.mcp_server"
+    script = (
+        f'for py in {pinned} python3 python; do '
+        f'command -v "$py" >/dev/null 2>&1 && '
+        f'"$py" -c "{probe}" >/dev/null 2>&1 && '
+        f'exec "$py" -m repoctx.mcp_server; '
+        f"done; "
+        f"command -v uv >/dev/null 2>&1 && "
+        f"exec uv run --no-project --with repoctx-mcp python -m repoctx.mcp_server; "
+        f"python3 -m pip install --quiet repoctx-mcp 1>&2 && "
+        f"exec python3 -m repoctx.mcp_server; "
+        f'echo "repoctx: could not launch the MCP server (no Python with '
+        f'repoctx-mcp, no uv, and pip install failed). Fix with: pip install '
+        f'repoctx-mcp" >&2; '
+        f"exit 1"
+    )
+    return {"command": "sh", "args": ["-c", script]}
 
 CLAUDE_MD_FILENAME = "CLAUDE.md"
 AGENTS_MD_FILENAME = "AGENTS.md"
@@ -476,17 +555,14 @@ def _ensure_mcp_registration(root: Path) -> tuple[Path, bool]:
     else:
         config = {}
     servers = config.setdefault("mcpServers", {})
-    # Pin to the interpreter that ran ``repoctx install`` — the host launches
-    # the MCP server via the shell, whose PATH may not include the venv.
-    desired = {
-        "command": sys.executable,
-        "args": ["-m", "repoctx.mcp_server", "--repo", str(root)],
-    }
+    desired = portable_mcp_server_config()
     existing = servers.get(MCP_SERVER_NAME)
     if existing == desired:
         return path, False
-    # Upgrade in place: older installs wrote ``"command": "python"`` which
-    # silently fails when the host's shell PATH doesn't include the venv.
+    # Upgrade in place: older installs pinned the installer's absolute
+    # interpreter (and ``--repo <abs path>``), which can never spawn on any
+    # other machine — committed to git, that config broke every cloud
+    # session and teammate checkout.
     servers[MCP_SERVER_NAME] = desired
     path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     return path, True
@@ -641,5 +717,6 @@ __all__ = [
     "POINTER_TEMPLATE",
     "ensure_claude_md_nudge",
     "install_claude_code",
+    "portable_mcp_server_config",
     "render_agents_section",
 ]

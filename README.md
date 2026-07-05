@@ -129,33 +129,72 @@ codex mcp add repoctx -- python3 -m repoctx.mcp_server
 
 ## Cloud sessions (Claude Code on the web, Codex)
 
-Cloud sessions run in an ephemeral container cloned fresh each time, so the
-three things RepoCtx needs — the package, the embedding model, and the index —
-have to be (re)created at session start. This repo wires that up:
+Cloud sessions run in an ephemeral container cloned fresh each time — with none
+of your machine's interpreters, packages, or paths. Two independent layers make
+RepoCtx work there:
 
-- **`scripts/cloud-setup.sh`** does the work: `pip install -e ".[embeddings]"`
-  (packages), then `python3 -m repoctx index --refresh`, which downloads the Qwen3
-  model and builds the index on the first run, and on later runs only re-embeds
-  the `origin/main` delta. The container filesystem is cached after the first run,
-  so the cold start pays the full install + model download + build (a couple of
-  minutes), while **warm sessions skip the install and do a near-no-op refresh —
-  a few seconds.** Both steps are guarded to stay cheap when already satisfied.
-- **Claude Code on the web** runs it automatically via the `SessionStart` hook in
-  `.claude/settings.json` → `.claude/hooks/session-start.sh` (gated to remote
-  sessions; a no-op locally). The MCP server is registered in `.mcp.json`.
-- **Codex** registers the server in `.codex/config.toml`. Codex configures setup
-  environment-side rather than via a repo hook, so point your Codex cloud
-  environment's setup script at `bash scripts/cloud-setup.sh`.
+### Layer 1 — connection (works with zero setup)
 
-The hook is **synchronous** by default: the session waits for setup to finish,
-guaranteeing retrieval is ready before the agent starts, at the cost of a slower
-first session (subsequent sessions hit the cache). To trade that for a faster
-start, make the first line of `.claude/hooks/session-start.sh` emit
-`{"async": true, "asyncTimeout": 600000}`.
+The MCP config `repoctx install` writes (`.mcp.json`, `.cursor/mcp.json`,
+`.codex/mcp.json`) is **committed, machine-portable, and self-bootstrapping**.
+At server launch it tries, in order:
 
-> **Network policy.** Setup needs egress to PyPI (packages) and huggingface.co
-> (model). If your environment's network policy blocks either, the build can't
-> run and retrieval degrades to lexical-only (loudly) — see
+1. a Python that already has repoctx (the interpreter that ran the install,
+   then `python3`/`python` from PATH — probed for existence first, so a path
+   from another machine just falls through);
+2. `uv run --with repoctx-mcp` — resolves the published package into a cached
+   ephemeral env in seconds (`uv` ships preinstalled in Claude Code cloud
+   images), no system mutation, immune to PEP 668;
+3. `pip install repoctx-mcp` as a last resort.
+
+So the server connects even on a cold container where nothing was installed —
+retrieval is lexical-only (loudly, via `warnings[]`/`index_status`) until the
+embedding layer below is set up. The cold-start resolve is ~10–20s, inside
+Claude Code's ~30s MCP startup timeout (raise with `MCP_TIMEOUT` if your
+network is slow); warm containers connect instantly. Configs written by
+pre-1.7 installs pinned the installing machine's absolute interpreter path and
+`--repo` — those can never spawn in a container; re-run `repoctx install` once
+and commit the rewritten config.
+
+SessionStart hooks are deliberately **not** part of this layer: hosts don't
+guarantee hooks finish before MCP servers launch, so "the hook will have
+installed it by then" is a race the command itself must not depend on.
+
+### Layer 2 — semantic retrieval (automatic in remote sessions)
+
+Embeddings need the `[embeddings]` extra, the ~1.2 GB Qwen3 model, and an
+index — too heavy for connection time, so the server **provisions them
+itself, in the background, while already serving**. In a remote container
+(`CLAUDE_CODE_REMOTE=true`, or `REPOCTX_AUTO_EMBEDDINGS=1` anywhere) the
+first tool call kicks a daemon thread that:
+
+1. installs `repoctx-mcp[embeddings]` into the server's own environment
+   (via `uv pip` when available — works inside uv's ephemeral envs and
+   sidesteps PEP 668 — else `pip`; torch resolves from the CPU wheel index);
+2. records index consent as granted (the container is disposable; a
+   previously **declined** consent is always respected and stops the run);
+3. builds/refreshes the `origin/main` index.
+
+Until it finishes, retrieval is lexical-only and every bundle's `warnings[]`
+says provisioning is underway ("no action needed"); the next tool call after
+completion serves semantic results — nothing restarts. Progress is journaled
+to `<git-common-dir>/repoctx/state/autoprovision.json`. Kill switch:
+`REPOCTX_AUTO_EMBEDDINGS=0`.
+
+**Optional fast path:** provisioning costs a few cold minutes once per
+container cache. To have semantic retrieval ready at session start instead,
+put the same work in the cloud environment's **setup script** (the "Setup
+script" field in Claude Code on the web), which runs before the session and
+is cached:
+
+- this repo: `bash scripts/cloud-setup.sh`
+- a repo that *uses* RepoCtx: `repoctx autoprovision`
+  (or `pip install "repoctx-mcp[embeddings]" && repoctx index --refresh`)
+
+> **Network policy.** Layer 1 needs egress to PyPI (or a warm container);
+> layer 2 additionally needs huggingface.co (model). If policy blocks them,
+> the server still connects wherever a local Python has the package, and
+> retrieval degrades to lexical-only (loudly) — see
 > [Embeddings](#embeddings-optional-on-by-default).
 
 ---
