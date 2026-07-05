@@ -6,6 +6,42 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Fixed — committed MCP configs were machine-pinned, so cloud sessions (and teammates) could never connect
+
+`repoctx install` wrote the installing machine's absolute interpreter path and
+`--repo <absolute repo path>` into `.mcp.json` / `.cursor/mcp.json` /
+`.codex/mcp.json`. Those files are committed and travel with the repo — to
+cloud containers (Claude Code on the web, Codex cloud) and teammates' machines
+where neither path exists, so the server process could never spawn and every
+session showed "failed to connect". Relying on a SessionStart hook to
+pip-install first doesn't fix it: hosts don't guarantee hooks complete before
+MCP servers launch.
+
+- **The generated config is now portable and self-bootstrapping.** On POSIX it
+  is a small launcher that tries, in order: interpreters that already have the
+  server (the install-time interpreter, then `python3`/`python` from PATH —
+  each probed for existence and for the `mcp` dependency, not just the
+  package), then `uv run --no-project --with repoctx-mcp` (cached ephemeral
+  env, preinstalled in Claude Code cloud images, immune to PEP 668), then a
+  quiet `pip install` last resort with stdout redirected to stderr so MCP
+  stdio framing stays clean. Windows keeps the pinned single-command form.
+- **No more `--repo` pin.** Hosts launch project-scoped servers with cwd at
+  the project root, which repo-root resolution already prefers as a live
+  signal; a committed absolute path only re-broke portability.
+- **Hook commands are portable too.** `.claude/settings.json` hooks now fall
+  back from the pinned interpreter to `python3` and end in `|| true`, so a
+  machine without repoctx no-ops silently instead of erroring on every
+  prompt/edit/stop.
+- **Auto-upgrade.** Re-running `repoctx install` rewrites a legacy pinned
+  entry in place (idempotent afterwards). Existing repos need one re-install +
+  commit.
+- **New console script `repoctx-mcp`** (→ `repoctx.mcp_server:main`), so
+  `uvx repoctx-mcp` starts the server straight from PyPI — a zero-install
+  one-liner for manual MCP configs.
+- README: the "Cloud sessions" section now separates the connection layer
+  (zero-setup, self-bootstrapping) from the semantic layer (embeddings + index
+  via the environment setup script).
+
 ### Fixed — MCP `initialize` handshake timed out during the cold embedding load
 
 On a cold CPU host, loading the Qwen3-Embedding-0.6B weights can take >60s.

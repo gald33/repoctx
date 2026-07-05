@@ -48,6 +48,9 @@ dev = [
 
 [project.scripts]
 repoctx = "repoctx.main:main"
+# Server entry point matching the package name, so `uvx repoctx-mcp` starts
+# the MCP server directly from PyPI with zero prior install.
+repoctx-mcp = "repoctx.mcp_server:main"
 
 [tool.setuptools.packages.find]
 include = ["repoctx*"]

@@ -11,13 +11,13 @@ evolves; the AGENTS.md section is what actually guides the agent.
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 from repoctx.harness.claude_code import (
     InstallResult,
     MCP_SERVER_NAME,
     _ensure_agents_section,
+    portable_mcp_server_config,
 )
 
 
@@ -44,12 +44,9 @@ def _ensure_codex_mcp(root: Path) -> tuple[Path, bool]:
     else:
         config = {}
     servers = config.setdefault("mcpServers", {})
-    # Pin to the interpreter that ran ``repoctx install`` — the host launches
-    # the MCP server via the shell, whose PATH may not include the venv.
-    desired = {
-        "command": sys.executable,
-        "args": ["-m", "repoctx.mcp_server", "--repo", str(root)],
-    }
+    # Committed and shared across machines — must be portable and
+    # self-bootstrapping (see portable_mcp_server_config).
+    desired = portable_mcp_server_config()
     if servers.get(MCP_SERVER_NAME) == desired:
         return path, False
     servers[MCP_SERVER_NAME] = desired

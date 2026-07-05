@@ -47,6 +47,21 @@ def test_install_codex_preserves_other_servers(tmp_path: Path) -> None:
     assert set(config["mcpServers"].keys()) == {"other", "repoctx"}
 
 
+@pytest.mark.parametrize("installer", [install_cursor, install_codex])
+def test_cursor_and_codex_configs_are_machine_portable(
+    tmp_path: Path, installer
+) -> None:
+    """Same portability contract as .mcp.json: these files are committed and
+    travel to machines/containers that don't have the installer's paths."""
+    result = installer(tmp_path)
+    entry = json.loads(result.mcp_config.read_text())["mcpServers"]["repoctx"]
+    assert entry["command"] == "sh"
+    script = entry["args"][1]
+    assert "uv run --no-project --with repoctx-mcp" in script
+    assert "--repo" not in script
+    assert str(tmp_path) not in script
+
+
 # -- install_all + embedding index --------------------------------------------
 
 
