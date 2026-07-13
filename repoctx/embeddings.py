@@ -164,6 +164,44 @@ def _resolve_dtype(config: EmbeddingConfig, device: str) -> str:
     return "fp16" if device.startswith(("mps", "cuda")) else "fp32"
 
 
+def _model_is_cached(model_name: str) -> bool:
+    """Whether ``model_name`` is already present in the local Hugging Face cache.
+
+    Best-effort: a positive result means a plain `config.json` for the model is
+    resolvable from the cache, which is a reliable proxy for "the snapshot was
+    downloaded". Any failure (huggingface_hub absent, unexpected return) is
+    treated as *not* cached so we never force offline mode on an incomplete
+    cache.
+    """
+    try:
+        from huggingface_hub import try_to_load_from_cache
+
+        # Returns the file path (str) on a cache hit; a sentinel / None otherwise.
+        return isinstance(try_to_load_from_cache(model_name, "config.json"), str)
+    except Exception:  # noqa: BLE001 — cache probing must never break a load
+        return False
+
+
+def _should_load_offline(model_name: str) -> bool:
+    """Whether to load ``model_name`` with zero network (``local_files_only``).
+
+    Default (``REPOCTX_EMBEDDINGS_OFFLINE`` unset): **auto** — offline exactly
+    when the model is already cached. This skips the ~15 huggingface.co metadata
+    round-trips (HEAD/GET through an egress proxy) that a "cached" online load
+    still performs, which add ~10s and, on a cold cloud runner, are enough to
+    push the background warm — or a legacy eager preload — past the MCP client's
+    ~60s `initialize` ceiling. A cached model needs none of them.
+
+    ``REPOCTX_EMBEDDINGS_OFFLINE=1`` forces offline everywhere; ``=0`` disables
+    the optimization (always allow network), for callers who deliberately want
+    online refresh of a cached model.
+    """
+    raw = os.environ.get("REPOCTX_EMBEDDINGS_OFFLINE")
+    if raw is not None:
+        return raw.strip().lower() in ("1", "true", "yes", "on")
+    return _model_is_cached(model_name)
+
+
 # Empirically safe upper bound for MPS Metal buffer allocations on a 16 GB
 # Apple silicon machine encoding ~256-token chunks at fp16. Larger batches
 # risk tripping the unrecoverable `Failed to allocate private MTLBuffer`
@@ -204,7 +242,24 @@ class EmbeddingModel:
         kwargs: dict = {"trust_remote_code": True}
         if device:
             kwargs["device"] = device
-        self._model = SentenceTransformer(config.model_name, **kwargs)
+        # When the model is already cached, load it with zero network
+        # (`local_files_only`) so the warm never waits on huggingface.co — see
+        # `_should_load_offline`. Fall back to a normal (network-capable) load if
+        # the offline attempt fails (e.g. an incomplete cache) or the installed
+        # sentence-transformers predates the kwarg, so a genuine first-run
+        # download still works.
+        if _should_load_offline(config.model_name):
+            try:
+                self._model = SentenceTransformer(
+                    config.model_name, local_files_only=True, **kwargs
+                )
+            except Exception as exc:  # noqa: BLE001 — offline is an optimization, not a requirement
+                logger.debug(
+                    "Offline model load failed (%s); retrying with network allowed", exc
+                )
+                self._model = SentenceTransformer(config.model_name, **kwargs)
+        else:
+            self._model = SentenceTransformer(config.model_name, **kwargs)
         # sentence-transformers exposes the resolved device on `.device`;
         # str() it for stable comparison ("cpu", "mps", "cuda:0", ...).
         resolved = str(getattr(self._model, "device", device or "cpu"))

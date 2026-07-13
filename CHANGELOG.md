@@ -6,6 +6,8 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-07-13
+
 ### Added — semantic retrieval provisions itself in remote sessions (zero setup)
 
 Connecting was only half the cloud story: without a per-environment setup
@@ -97,6 +99,26 @@ registered (reproduced reliably in Claude Code cloud sessions).
 - **Escape hatch.** `REPOCTX_EAGER_EMBEDDINGS=1` restores the legacy blocking
   preload (load on the startup thread before the server serves).
 - No behavior change for normal users; embedding-ranked results are unchanged.
+
+### Changed — cached embedding model loads with zero network
+
+Even after the warm moved off the startup path, the model load still made ~15
+Hugging Face metadata round-trips (`HEAD`/`GET` to huggingface.co) on every
+start — a cached model included. Through an egress proxy those add ~10s and, on
+a cold cloud runner, are enough to push the background warm (or a legacy
+`REPOCTX_EAGER_EMBEDDINGS` preload) back past the ~60s `initialize` ceiling.
+
+- **Offline-when-cached.** When the model is already in the local Hugging Face
+  cache, `EmbeddingModel` now loads it with `local_files_only=True`, so the warm
+  does no network at all (measured cold `initialize`: ~17s online → ~9s
+  offline). A genuine first-run download still works: the offline path is only
+  taken when the model is cached, and it falls back to a network-capable load if
+  the cache turns out incomplete.
+- **Override.** `REPOCTX_EMBEDDINGS_OFFLINE=1` forces offline everywhere; `=0`
+  disables the optimization (always allow network). Unset = auto (offline iff
+  cached).
+- Removes the need for downstream repos to wrap the server in an
+  `HF_HUB_OFFLINE` launcher just to connect reliably in cloud.
 
 ### Fixed — cross-repo identity bleed in the long-lived MCP server
 
