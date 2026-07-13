@@ -238,6 +238,98 @@ def test_cpu_device_never_clamps() -> None:
     assert m.batch_size == 64
 
 
+# -- offline-when-cached model load ------------------------------------------
+
+
+def test_should_load_offline_auto_follows_cache() -> None:
+    from repoctx import embeddings
+
+    with patch.object(embeddings, "_model_is_cached", return_value=True):
+        assert embeddings._should_load_offline("some/model") is True
+    with patch.object(embeddings, "_model_is_cached", return_value=False):
+        assert embeddings._should_load_offline("some/model") is False
+
+
+def test_should_load_offline_env_override(monkeypatch) -> None:
+    from repoctx import embeddings
+
+    # Force on even when not cached; disable even when cached.
+    with patch.object(embeddings, "_model_is_cached", return_value=False):
+        monkeypatch.setenv("REPOCTX_EMBEDDINGS_OFFLINE", "1")
+        assert embeddings._should_load_offline("m") is True
+    with patch.object(embeddings, "_model_is_cached", return_value=True):
+        monkeypatch.setenv("REPOCTX_EMBEDDINGS_OFFLINE", "0")
+        assert embeddings._should_load_offline("m") is False
+
+
+def test_load_model_uses_local_files_only_when_cached() -> None:
+    """A cached model loads with local_files_only=True (zero network)."""
+    from repoctx import embeddings
+    from repoctx.embeddings import EmbeddingModel
+
+    calls: list[dict] = []
+
+    def _record(*_a, **kw):
+        calls.append(kw)
+        return _SpyModel(device="cpu")
+
+    with patch.multiple(
+        "repoctx.embeddings",
+        HAS_EMBEDDINGS=True,
+        SentenceTransformer=_record,
+    ), patch.object(embeddings, "_model_is_cached", return_value=True):
+        EmbeddingModel(EmbeddingConfig(device="cpu"))
+
+    assert len(calls) == 1
+    assert calls[0].get("local_files_only") is True
+
+
+def test_load_model_stays_online_when_not_cached() -> None:
+    from repoctx import embeddings
+    from repoctx.embeddings import EmbeddingModel
+
+    calls: list[dict] = []
+
+    def _record(*_a, **kw):
+        calls.append(kw)
+        return _SpyModel(device="cpu")
+
+    with patch.multiple(
+        "repoctx.embeddings",
+        HAS_EMBEDDINGS=True,
+        SentenceTransformer=_record,
+    ), patch.object(embeddings, "_model_is_cached", return_value=False):
+        EmbeddingModel(EmbeddingConfig(device="cpu"))
+
+    assert len(calls) == 1
+    assert "local_files_only" not in calls[0]
+
+
+def test_load_model_falls_back_online_when_offline_load_fails() -> None:
+    """An incomplete cache (offline load raises) retries with network allowed."""
+    from repoctx import embeddings
+    from repoctx.embeddings import EmbeddingModel
+
+    calls: list[dict] = []
+
+    def _record(*_a, **kw):
+        calls.append(kw)
+        if kw.get("local_files_only"):
+            raise OSError("incomplete cache")
+        return _SpyModel(device="cpu")
+
+    with patch.multiple(
+        "repoctx.embeddings",
+        HAS_EMBEDDINGS=True,
+        SentenceTransformer=_record,
+    ), patch.object(embeddings, "_model_is_cached", return_value=True):
+        EmbeddingModel(EmbeddingConfig(device="cpu"))
+
+    assert len(calls) == 2
+    assert calls[0].get("local_files_only") is True
+    assert "local_files_only" not in calls[1]
+
+
 def test_encode_documents_falls_back_to_cpu_on_runtime_error() -> None:
     from repoctx.embeddings import EmbeddingModel
 
