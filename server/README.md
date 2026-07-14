@@ -21,6 +21,26 @@ identifiers (`path`, `query`, `code`, `task`, `error_message`, `remote_url`, …
 full list in `src/index.ts`). The client is supposed to never send those; the
 server enforces independently so a buggy client release can't leak.
 
+### Dogfood lane (opt-in full error detail)
+
+The default lane stores only an error *class*. Installs running
+`REPOCTX_DOGFOOD=1` additionally send `error_message` + `traceback` tagged
+`dogfood: true`; the Worker accepts those two keys **only** when that flag is
+set (they stay forbidden otherwise), and stores them in the `dogfood`,
+`error_message`, `traceback` columns added by `migrations/0002_dogfood.sql`.
+Everything else (paths, queries, code, remotes, host/user) is still stripped.
+Query recent dogfood failures with:
+
+```sql
+SELECT event_time, op, error_type, error_message, traceback
+FROM events WHERE dogfood = 1 AND success = 0
+ORDER BY event_time DESC LIMIT 20;
+```
+
+Deploying the change to an existing endpoint: `npm run db:migrate` (applies
+`0002`) then `npm run deploy`. The migration is additive (nullable columns),
+so old clients keep working unchanged.
+
 ## One-time setup
 
 You need a Cloudflare account (free tier is enough) and Node.js installed.

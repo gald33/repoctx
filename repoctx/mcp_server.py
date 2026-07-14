@@ -540,6 +540,9 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
             result = fn()
         except Exception as exc:
             try:
+                from repoctx import reporting as _reporting
+
+                err_message, err_traceback = _reporting.capture_exc_detail(exc)
                 record_protocol_op(
                     telemetry_dir=telemetry_dir,
                     op=op_name,
@@ -552,6 +555,8 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
                     duration_ms=int((perf_counter() - started) * 1000),
                     output_bytes=0,
                     error_type=type(exc).__name__,
+                    error_message=err_message,
+                    traceback=err_traceback,
                 )
             except Exception:
                 logger.debug("Failed to record protocol_op telemetry", exc_info=True)
