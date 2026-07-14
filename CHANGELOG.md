@@ -6,6 +6,8 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-07-14
+
 ### Added — dogfood failure reporting (opt-in, full error detail)
 
 The default reporting lane uploads error *classes* only — enough to count
