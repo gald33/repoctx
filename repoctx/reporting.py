@@ -114,6 +114,32 @@ FORBIDDEN_UPLOAD_KEYS = frozenset({
     "traceback",
 })
 
+# ---- Dogfood mode -----------------------------------------------------------
+#
+# "Dogfood" is a maintainer-only opt-in (env var ``REPOCTX_DOGFOOD``) that
+# trades the anonymity of the default lane for debuggability: it lets a
+# *small, consenting* set of installs upload the full failure detail an
+# error class name can't give you — the exception message and traceback.
+#
+# It is deliberately NOT tied to the release channel. A dogfood install is
+# still ``stable`` or ``canary``; ``dogfood`` is an orthogonal boolean the
+# ingest Worker keys on to decide whether to accept the exempted fields.
+# Public canary users are unaffected — canary stays redacted; only installs
+# that explicitly set ``REPOCTX_DOGFOOD=1`` send messages/tracebacks.
+
+# The two keys that survive redaction *only* in dogfood mode. Everything else
+# in FORBIDDEN_UPLOAD_KEYS (paths, queries, code, remotes, host/user) is still
+# stripped — a traceback may embed install paths, which is acceptable for a
+# maintainer dogfooding their own tool, but we never ship the target repo's
+# queries or code even here.
+DOGFOOD_EXEMPT_KEYS = frozenset({"error_message", "traceback"})
+
+# Caps so a pathological exception can't blow past the Worker's per-event
+# size limit. Tracebacks are truncated from the *front* (oldest frames) so
+# the innermost, most-diagnostic frames always survive.
+DOGFOOD_MAX_MESSAGE_CHARS = 2_000
+DOGFOOD_MAX_TRACEBACK_CHARS = 8_000
+
 _CACHED_INSTALL_ID: str | None = None
 _ATEXIT_REGISTERED = False
 
@@ -146,6 +172,40 @@ def _env_kill_switch() -> bool | None:
     if norm in {"on", "1", "true", "yes", "enable", "enabled"}:
         return True
     return None
+
+
+def is_dogfood() -> bool:
+    """Return True iff ``REPOCTX_DOGFOOD`` is set to an on-ish value.
+
+    Env-only by design: dogfood is a per-environment maintainer opt-in, not
+    persistent state — set it on your own machines / cloud sessions and it's
+    gone the moment you unset it. Recognized on values (case-insensitive):
+    ``on``, ``1``, ``true``, ``yes``, ``enable``, ``enabled``.
+    """
+    raw = os.environ.get("REPOCTX_DOGFOOD")
+    if raw is None:
+        return False
+    return raw.strip().lower() in {"on", "1", "true", "yes", "enable", "enabled"}
+
+
+def capture_exc_detail(exc: BaseException) -> tuple[str | None, str | None]:
+    """Return ``(message, traceback)`` for ``exc`` — but only in dogfood mode.
+
+    Off dogfood this returns ``(None, None)`` so nothing but the error *class*
+    (recorded separately as ``error_type``) is ever captured — the default
+    lane's contract is unchanged and no traceback is even written to the
+    local log. In dogfood mode both are truncated to the size caps above.
+    """
+    if not is_dogfood():
+        return None, None
+    import traceback as _traceback
+
+    message = (str(exc) or type(exc).__name__)[:DOGFOOD_MAX_MESSAGE_CHARS] or None
+    formatted = "".join(
+        _traceback.format_exception(type(exc), exc, exc.__traceback__)
+    ).strip()
+    tb = formatted[-DOGFOOD_MAX_TRACEBACK_CHARS:] if formatted else None
+    return message, tb
 
 
 def get_state_dir(state_dir: str | Path | None = None) -> Path:
@@ -302,9 +362,10 @@ def is_enabled(state_dir: str | Path | None = None) -> bool:
     """Resolve the effective enabled state, applying all precedence rules.
 
     Precedence (highest wins):
-      1. ``REPOCTX_REPORTING`` env var
-      2. ``reporting.json`` ``enabled`` field (if explicitly set)
-      3. Channel default (canary=True, stable=False)
+      1. ``REPOCTX_REPORTING`` env var (hard on/off — wins even over dogfood)
+      2. ``REPOCTX_DOGFOOD`` (dogfood implies reporting on)
+      3. ``reporting.json`` ``enabled`` field (if explicitly set)
+      4. Channel default (canary=True, stable=False)
 
     Side-effect-free: a stable install that never opts in never causes the
     state file to be created.
@@ -312,6 +373,8 @@ def is_enabled(state_dir: str | Path | None = None) -> bool:
     env = _env_kill_switch()
     if env is not None:
         return env
+    if is_dogfood():
+        return True
     state = _read_state_if_exists(state_dir)
     if state is not None and state.enabled is not None:
         return state.enabled
@@ -374,8 +437,10 @@ def get_status(state_dir: str | Path | None = None) -> dict[str, Any]:
         "build_id": BUILD_ID,
         "install_id": state.install_id,
         "enabled": effective,
+        "dogfood": is_dogfood(),
         "enabled_source": (
             "env" if env is not None
+            else "dogfood" if is_dogfood()
             else "state_file" if state.enabled is not None
             else "channel_default"
         ),
@@ -449,18 +514,27 @@ def build_upload_payload(
     """Convert a local telemetry payload into an upload-safe payload.
 
     Strips forbidden keys, attaches channel/build_id/install_id, replaces
-    any local repo_hash with repo_fingerprint.
+    any local repo_hash with repo_fingerprint. In dogfood mode the exception
+    message/traceback keys survive the strip and the payload is tagged
+    ``dogfood: True`` so the ingest Worker knows to accept them.
     """
+    dogfood = is_dogfood()
+    forbidden = FORBIDDEN_UPLOAD_KEYS - DOGFOOD_EXEMPT_KEYS if dogfood else FORBIDDEN_UPLOAD_KEYS
+
     out: dict[str, Any] = {}
     for key, value in local_event.items():
-        if key in FORBIDDEN_UPLOAD_KEYS:
+        if key in forbidden:
             continue
+        if key in DOGFOOD_EXEMPT_KEYS and value is None:
+            continue  # don't ship empty message/traceback fields
         out[key] = value
 
     out["upload_schema_version"] = UPLOAD_SCHEMA_VERSION
     out["channel"] = CHANNEL
     out["build_id"] = BUILD_ID
     out["install_id"] = get_install_id(state_dir)
+    if dogfood:
+        out["dogfood"] = True
 
     fp = compute_repo_fingerprint(repo_root, state_dir=state_dir)
     if fp is not None:

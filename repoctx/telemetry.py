@@ -175,6 +175,8 @@ def record_repoctx_invocation(
     output_format: str,
     output_bytes: int,
     error_type: str | None = None,
+    error_message: str | None = None,
+    traceback: str | None = None,
 ) -> Path:
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -198,6 +200,10 @@ def record_repoctx_invocation(
         "output_format": output_format,
         "output_bytes": output_bytes,
     }
+    if error_message is not None:
+        payload["error_message"] = error_message
+    if traceback is not None:
+        payload["traceback"] = traceback
     return append_jsonl(telemetry_dir, REPOCTX_EVENTS_FILE, payload)
 
 
@@ -214,6 +220,8 @@ def record_protocol_op(
     duration_ms: int,
     output_bytes: int,
     error_type: str | None = None,
+    error_message: str | None = None,
+    traceback: str | None = None,
     extras: dict[str, Any] | None = None,
 ) -> Path:
     """Record a single repoctx-v2 protocol-op invocation.
@@ -221,6 +229,12 @@ def record_protocol_op(
     Emits one line per call to ``bundle`` / ``authority`` / ``scope`` /
     ``validate_plan`` / ``risk_report`` / ``refresh``. Used to measure the
     "calls per task" success metric from the v2 design doc.
+
+    ``error_message`` / ``traceback`` are populated only by dogfood installs
+    (see :func:`repoctx.reporting.capture_exc_detail`); off dogfood they stay
+    ``None`` and never touch the local log or the upload queue. When present
+    they ride the reporting path and survive redaction (the upload boundary
+    tags the payload ``dogfood: True`` so the ingest Worker accepts them).
     """
     payload: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -237,6 +251,10 @@ def record_protocol_op(
         "duration_ms": duration_ms,
         "output_bytes": output_bytes,
     }
+    if error_message is not None:
+        payload["error_message"] = error_message
+    if traceback is not None:
+        payload["traceback"] = traceback
     if extras:
         payload["extras"] = extras
     written = append_jsonl(telemetry_dir, REPOCTX_EVENTS_FILE, payload)

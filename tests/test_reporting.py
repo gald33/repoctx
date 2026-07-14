@@ -40,6 +40,7 @@ def _reset_module(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("REPOCTX_REPORTING", raising=False)
     monkeypatch.delenv("REPOCTX_REPORTING_DIR", raising=False)
     monkeypatch.delenv("REPOCTX_REPORTING_ENDPOINT", raising=False)
+    monkeypatch.delenv("REPOCTX_DOGFOOD", raising=False)
 
 
 @pytest.fixture
@@ -267,6 +268,113 @@ def test_build_upload_payload_omits_repo_fingerprint_without_git(
     local = {"event_type": "protocol_op", "op": "bundle"}
     upload = build_upload_payload(local, repo_root=non_git, state_dir=state_dir)
     assert "repo_fingerprint" not in upload
+
+
+# ---- Dogfood mode -----------------------------------------------------------
+
+
+def test_is_dogfood_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert reporting.is_dogfood() is False
+    monkeypatch.setenv("REPOCTX_DOGFOOD", "1")
+    assert reporting.is_dogfood() is True
+    monkeypatch.setenv("REPOCTX_DOGFOOD", "off")
+    assert reporting.is_dogfood() is False
+
+
+def test_dogfood_implies_enabled_on_stable(
+    stable_channel: None, state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Stable defaults OFF...
+    assert is_enabled(state_dir) is False
+    # ...but dogfood forces it on without touching the state file.
+    monkeypatch.setenv("REPOCTX_DOGFOOD", "1")
+    assert is_enabled(state_dir) is True
+
+
+def test_reporting_kill_switch_beats_dogfood(
+    stable_channel: None, state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("REPOCTX_DOGFOOD", "1")
+    monkeypatch.setenv("REPOCTX_REPORTING", "off")
+    assert is_enabled(state_dir) is False
+
+
+def test_build_upload_payload_keeps_detail_in_dogfood(
+    stable_channel: None, state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("REPOCTX_DOGFOOD", "1")
+    local = {
+        "event_type": "protocol_op",
+        "op": "bundle",
+        "success": False,
+        "error_type": "RuntimeError",
+        "error_message": "boom while bundling",
+        "traceback": 'Traceback (most recent call last):\n  ...\nRuntimeError: boom',
+        "repo_root": "/Users/alice/proj",  # still forbidden, even in dogfood
+        "query": "refactor auth",           # still forbidden
+    }
+    upload = build_upload_payload(local, state_dir=state_dir)
+
+    assert upload["dogfood"] is True
+    assert upload["error_message"] == "boom while bundling"
+    assert "RuntimeError: boom" in upload["traceback"]
+    # The genuinely sensitive keys are stripped even here.
+    assert "repo_root" not in upload
+    assert "query" not in upload
+
+
+def test_build_upload_payload_strips_detail_without_dogfood(
+    stable_channel: None, state_dir: Path
+) -> None:
+    local = {
+        "event_type": "protocol_op",
+        "op": "bundle",
+        "success": False,
+        "error_type": "RuntimeError",
+        "error_message": "boom while bundling",
+        "traceback": "Traceback ...\nRuntimeError: boom",
+    }
+    upload = build_upload_payload(local, state_dir=state_dir)
+
+    assert "dogfood" not in upload
+    assert "error_message" not in upload
+    assert "traceback" not in upload
+    assert upload["error_type"] == "RuntimeError"  # class survives, as before
+
+
+def test_capture_exc_detail_only_in_dogfood(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    try:
+        raise ValueError("something specific broke")
+    except ValueError as exc:
+        msg_off, tb_off = reporting.capture_exc_detail(exc)
+        assert msg_off is None and tb_off is None
+
+        monkeypatch.setenv("REPOCTX_DOGFOOD", "1")
+        msg_on, tb_on = reporting.capture_exc_detail(exc)
+        assert msg_on == "something specific broke"
+        assert tb_on is not None and "ValueError: something specific broke" in tb_on
+
+
+def test_capture_exc_detail_truncates(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("REPOCTX_DOGFOOD", "1")
+    try:
+        raise ValueError("x" * 10_000)
+    except ValueError as exc:
+        msg, tb = reporting.capture_exc_detail(exc)
+    assert msg is not None and len(msg) == reporting.DOGFOOD_MAX_MESSAGE_CHARS
+    assert tb is not None and len(tb) <= reporting.DOGFOOD_MAX_TRACEBACK_CHARS
+
+
+def test_status_reports_dogfood(
+    stable_channel: None, state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("REPOCTX_DOGFOOD", "1")
+    status = get_status(state_dir)
+    assert status["dogfood"] is True
+    assert status["enabled"] is True
+    assert status["enabled_source"] == "dogfood"
 
 
 # ---- Enqueue ----------------------------------------------------------------

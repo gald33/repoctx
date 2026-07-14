@@ -6,6 +6,29 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added — dogfood failure reporting (opt-in, full error detail)
+
+The default reporting lane uploads error *classes* only — enough to count
+failures, useless for debugging them. A new maintainer-only **dogfood** mode
+(`REPOCTX_DOGFOOD=1`) uploads the exception message and traceback alongside,
+so agent-hit repoctx failures arrive actionable.
+
+- **Client.** `REPOCTX_DOGFOOD=1` implies reporting-on (still overridable by
+  `REPOCTX_REPORTING=off`) and exempts `error_message`/`traceback` from the
+  upload redaction, tagging the payload `dogfood: true`. `repoctx.reporting.
+  capture_exc_detail()` captures a truncated message + traceback **only** in
+  dogfood mode — off dogfood nothing but the error class is ever recorded,
+  even locally. Wired into the MCP protocol-op path (`bundle`, `authority`,
+  `scope`, `validate_plan`, `risk_report`, …). Surfaced in `reporting status`.
+- **Ingest Worker.** Accepts `error_message`/`traceback` **only** when
+  `dogfood: true`; without the flag they're rejected like any other forbidden
+  key, so public/canary users are unaffected. New nullable columns via
+  `server/migrations/0002_dogfood.sql` (needs `wrangler d1 migrations apply`
+  + `wrangler deploy`).
+- Privacy: paths, queries, code, remotes, and host/user are still stripped
+  even in dogfood — only the message and traceback ride along (a traceback may
+  embed install paths, acceptable for a maintainer debugging their own tool).
+
 ## [1.7.0] — 2026-07-13
 
 ### Added — semantic retrieval provisions itself in remote sessions (zero setup)

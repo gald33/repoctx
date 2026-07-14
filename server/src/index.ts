@@ -32,7 +32,17 @@ interface EventV1 {
   output_bytes?: number;
   repo_fingerprint?: string;
   stats?: Record<string, unknown>;
+  // Dogfood-only fields. `dogfood: true` is what unlocks acceptance of the
+  // message/traceback below; without it those keys are rejected like any
+  // other forbidden key. Set only by installs running REPOCTX_DOGFOOD=1.
+  dogfood?: boolean;
+  error_message?: string;
+  traceback?: string;
 }
+
+// Forbidden keys the ingest accepts *only* on an event that declares
+// `dogfood: true`. Kept in lockstep with the client's DOGFOOD_EXEMPT_KEYS.
+const DOGFOOD_EXEMPT_KEYS = new Set(["error_message", "traceback"]);
 
 // Keys we refuse to accept anywhere in the event. Defense-in-depth — the
 // client is supposed to never send these, but the server enforces the
@@ -137,6 +147,9 @@ export default {
         event.output_bytes ?? null,
         event.repo_fingerprint ?? null,
         event.stats ? JSON.stringify(event.stats) : null,
+        event.dogfood ? 1 : 0,
+        event.error_message ?? null,
+        event.traceback ?? null,
       ]);
     }
 
@@ -152,8 +165,9 @@ export default {
         received_at, event_time, schema_version, event_type,
         channel, build_id, install_id, session_id,
         op, success, error_type, duration_ms,
-        output_bytes, repo_fingerprint, stats_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        output_bytes, repo_fingerprint, stats_json,
+        dogfood, error_message, traceback
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     try {
       await env.DB.batch(rows.map((row) => stmt.bind(...row)));
@@ -187,11 +201,17 @@ function tryParseEvent(line: string): ParseResult {
   }
   const event = raw as Record<string, unknown>;
 
+  if (event.dogfood !== undefined && typeof event.dogfood !== "boolean") {
+    return { ok: false, reason: "bad_dogfood" };
+  }
+  const dogfood = event.dogfood === true;
+
   // Forbidden-key check at the top level. We don't deep-scan stats — the
   // client is responsible for keeping the stats blob clean — but we DO
-  // refuse any forbidden key on the event itself.
+  // refuse any forbidden key on the event itself. In dogfood mode the
+  // message/traceback keys are exempted; everything else stays forbidden.
   for (const key of Object.keys(event)) {
-    if (FORBIDDEN_KEYS.has(key)) {
+    if (FORBIDDEN_KEYS.has(key) && !(dogfood && DOGFOOD_EXEMPT_KEYS.has(key))) {
       return { ok: false, reason: `forbidden_key:${key}` };
     }
   }
@@ -261,6 +281,15 @@ function tryParseEvent(line: string): ParseResult {
     ) {
       return { ok: false, reason: "bad_stats" };
     }
+  }
+  if (
+    event.error_message !== undefined &&
+    typeof event.error_message !== "string"
+  ) {
+    return { ok: false, reason: "bad_error_message" };
+  }
+  if (event.traceback !== undefined && typeof event.traceback !== "string") {
+    return { ok: false, reason: "bad_traceback" };
   }
 
   return { ok: true, event: event as unknown as EventV1 };
