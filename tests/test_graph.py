@@ -315,3 +315,100 @@ def test_multiline_import_past_truncation_cap(tmp_path: Path) -> None:
 
     edges = build_dependency_graph(index).forward.get("big.py", set())
     assert {"pkg/mod.py", "pkg/other.py"} <= edges
+
+
+# ---- ast-based import extraction ---------------------------------------------
+#
+# Import extraction parses with `ast` and only falls back to the regex when the
+# source won't parse. Every import bug this module shipped was a regex failing
+# to model Python's grammar; these cover the forms that motivated the switch.
+
+
+def test_import_inside_docstring_is_not_an_edge(tmp_path: Path) -> None:
+    """The regex saw example imports in docstrings as real ones."""
+    _make_pkg(tmp_path)
+    write_file(
+        tmp_path / "app.py",
+        '"""Example usage:\n\nimport pkg.mod\n"""\n\nVALUE = 1\n',
+    )
+
+    assert _graph_for(tmp_path).get("app.py", set()) == set()
+
+
+def test_semicolon_separated_imports(tmp_path: Path) -> None:
+    _make_pkg(tmp_path)
+    write_file(tmp_path / "app.py", "import pkg.mod; import pkg.other\n")
+
+    edges = _graph_for(tmp_path).get("app.py", set())
+    assert {"pkg/mod.py", "pkg/other.py"} <= edges
+
+
+def test_conditional_and_guarded_imports(tmp_path: Path) -> None:
+    _make_pkg(tmp_path)
+    write_file(
+        tmp_path / "type_checking.py",
+        "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    from pkg import other\n",
+    )
+    write_file(
+        tmp_path / "guarded.py",
+        "try:\n    from pkg import mod\nexcept ImportError:\n    mod = None\n",
+    )
+
+    forward = _graph_for(tmp_path)
+    assert "pkg/other.py" in forward.get("type_checking.py", set())
+    assert "pkg/mod.py" in forward.get("guarded.py", set())
+
+
+def test_star_import_resolves_package_only(tmp_path: Path) -> None:
+    _make_pkg(tmp_path)
+    write_file(tmp_path / "app.py", "from pkg import *\n")
+
+    assert _graph_for(tmp_path).get("app.py", set()) == {"pkg/__init__.py"}
+
+
+def test_unparseable_source_falls_back_to_regex(tmp_path: Path) -> None:
+    """A syntax error must degrade, not drop the file's imports entirely."""
+    _make_pkg(tmp_path)
+    write_file(
+        tmp_path / "broken.py",
+        "from pkg import mod\n\ndef oops(:\n    this is not python\n",
+    )
+
+    # ast.parse raises; the regex fallback still finds the import.
+    assert "pkg/mod.py" in _graph_for(tmp_path).get("broken.py", set())
+
+
+def test_ast_path_handles_truncated_files_without_falling_back(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`import_source` must parse: it is dedented for exactly this reason.
+
+    A function-local import carried over with its original indentation is an
+    IndentationError at module level, which would silently drop every
+    truncated (i.e. large, central) file back to the regex fallback.
+    """
+    import repoctx.graph as graph_module
+    from repoctx.config import DEFAULT_CONFIG
+
+    _make_pkg(tmp_path)
+    filler = "# " + ("x" * 98) + "\n"
+    padding = filler * ((DEFAULT_CONFIG.max_file_bytes // len(filler)) + 20)
+    write_file(
+        tmp_path / "big.py",
+        "HEADER = 1\n" + padding + "\ndef late():\n    from pkg import mod\n    return mod\n",
+    )
+
+    fallbacks = []
+    original = graph_module._extract_python_dependencies_regex
+
+    def spy(*args, **kwargs):
+        fallbacks.append(args[0])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(graph_module, "_extract_python_dependencies_regex", spy)
+
+    index = scan_repository(tmp_path)
+    edges = build_dependency_graph(index).forward.get("big.py", set())
+
+    assert "pkg/mod.py" in edges
+    assert "big.py" not in fallbacks, "truncated file fell back to regex"

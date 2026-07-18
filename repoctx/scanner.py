@@ -199,8 +199,15 @@ def _harvest_import_lines(text: str) -> str:
 
     A plain line filter would keep ``from x import (`` but drop the indented
     names beneath it, so a parenthesized import would arrive at the graph with
-    an empty clause. Statements are emitted contiguously, so the graph's own
-    continuation scan sees them exactly as written.
+    an empty clause. Statements are emitted contiguously so continuations stay
+    intact.
+
+    Each statement's opening line is dedented: the graph parses this text with
+    ``ast``, and a function-local ``from x import y`` carried over with its
+    original indentation is an ``IndentationError`` at module level — which
+    would silently drop every large file back to the regex fallback.
+    Continuation lines keep their indentation, which is irrelevant inside
+    brackets or after a backslash.
     """
     lines = text.splitlines()
     out: list[str] = []
@@ -211,7 +218,7 @@ def _harvest_import_lines(text: str) -> str:
             index += 1
             continue
 
-        out.append(line)
+        out.append(line.lstrip())
         depth = line.count("(") - line.count(")")
         continued = line.rstrip().endswith("\\")
         index += 1

@@ -6,6 +6,40 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Changed — Python imports are parsed with `ast`, not regex
+
+Four import bugs shipped in a single day, every one the same shape: a regex
+failing to model Python's grammar. A `\s` class swallowing newlines (crashed
+every protocol op), an unguarded `[0]` on an empty segment, `from pkg import
+mod` missing the submodule, multi-line clauses contributing nothing. Each was
+found only by doubting the previous fix — which is the signal that the class
+wasn't exhausted, not that the last bug was the last one.
+
+`_extract_python_dependencies` now parses with `ast` and walks `Import` /
+`ImportFrom` nodes. The grammar is modelled by construction, so conditional,
+`TYPE_CHECKING`, function-local, `try/except`, aliased, star, and relative
+imports are all handled without special cases. The regex extractor is retained
+purely as a fallback for source that won't parse (syntax errors, Python 2), so
+an unparseable file degrades instead of dropping its imports.
+
+Two correctness wins beyond the bug class, both verified against the old path:
+
+- **No more phantom edges from docstrings.** A docstring containing
+  `import pkg.mod` (an extremely common "Example usage:" block) produced a real
+  dependency edge. `ast` sees a string, not an import.
+- **Semicolon-separated imports.** `import a; import b` registered only `a`.
+
+`scanner._harvest_import_lines` now dedents each statement's opening line. That
+text is parsed by `ast`, and a function-local `from x import y` carried over
+with its original indentation is an `IndentationError` at module level — which
+would have silently dropped every truncated (i.e. large, central) file back to
+the regex fallback. Verified: **0 regex fallbacks across all 137 indexed `.py`
+files**, truncated ones included.
+
+Cost: `ast` is ~8× the regex on that step (0.59 vs 0.07 ms/file), ~71 ms across
+this repo. A real `bundle` takes ~27 s end to end, so it is ~0.26% of an actual
+operation. Edge count is unchanged at 358 — parity, no regressions.
+
 ## [1.11.0] — 2026-07-18
 
 ### Fixed — multi-line `from X import (...)` clauses lost their submodule edges
