@@ -3,9 +3,75 @@ refresh, detect-changes, semantic-search."""
 
 import argparse
 import json
+import logging
+from time import perf_counter
 from types import SimpleNamespace
+from uuid import uuid4
+
+from repoctx.telemetry import record_protocol_op
+
+logger = logging.getLogger(__name__)
 
 NAME_TO_CMD = {}
+
+
+def _json_bytes(result) -> int:
+    return len(json.dumps(result).encode("utf-8"))
+
+
+def _run_op(op_name: str, task: str, repo_root, fn, *, to_bytes=_json_bytes):
+    """Execute a v2 protocol op on the CLI surface, recording telemetry.
+
+    Mirrors ``_run_op`` in :mod:`repoctx.mcp_server` but tags every event
+    ``surface="cli"`` so CLI usage is visible to the reporting/ingest pipeline
+    and the per-repo retrieval tuner (both of which otherwise see only
+    MCP-sourced events). On failure it records the error class and — in dogfood
+    mode only — the message/traceback via
+    :func:`repoctx.reporting.capture_exc_detail`, then re-raises so the CLI's
+    exit behavior is unchanged. Telemetry failures never mask the op result.
+    """
+    started = perf_counter()
+    sess = uuid4().hex
+    tid = uuid4().hex
+    try:
+        result = fn()
+    except Exception as exc:
+        try:
+            from repoctx import reporting as _reporting
+
+            err_message, err_traceback = _reporting.capture_exc_detail(exc)
+            record_protocol_op(
+                op=op_name,
+                surface="cli",
+                session_id=sess,
+                task_id=tid,
+                task=task,
+                repo_root=repo_root,
+                success=False,
+                duration_ms=int((perf_counter() - started) * 1000),
+                output_bytes=0,
+                error_type=type(exc).__name__,
+                error_message=err_message,
+                traceback=err_traceback,
+            )
+        except Exception:
+            logger.debug("Failed to record protocol_op telemetry", exc_info=True)
+        raise
+    try:
+        record_protocol_op(
+            op=op_name,
+            surface="cli",
+            session_id=sess,
+            task_id=tid,
+            task=task,
+            repo_root=repo_root,
+            success=True,
+            duration_ms=int((perf_counter() - started) * 1000),
+            output_bytes=to_bytes(result),
+        )
+    except Exception:
+        logger.debug("Failed to record protocol_op telemetry", exc_info=True)
+    return result
 
 
 # -- bundle -------------------------------------------------------------------
@@ -27,20 +93,29 @@ def _run_bundle(args: argparse.Namespace) -> None:
     if getattr(args, "format", "json") == "markdown":
         from repoctx.bundle import build_bundle, render_bundle_markdown
 
-        bundle = build_bundle(args.task, repo_root=args.repo)
-        print(render_bundle_markdown(bundle))
+        text = _run_op(
+            "bundle",
+            args.task,
+            args.repo,
+            lambda: render_bundle_markdown(build_bundle(args.task, repo_root=args.repo)),
+            to_bytes=lambda s: len(s.encode("utf-8")),
+        )
+        print(text)
         return
     from repoctx.protocol import op_bundle
 
-    print(json.dumps(
-        op_bundle(
+    result = _run_op(
+        "bundle",
+        args.task,
+        args.repo,
+        lambda: op_bundle(
             args.task,
             repo_root=args.repo,
             include_full_text=args.full,
             include_advisory=getattr(args, "include_advisory", False),
         ),
-        indent=2,
-    ))
+    )
+    print(json.dumps(result, indent=2))
 
 
 bundle_cmd = SimpleNamespace(NAME="bundle", register=_register_bundle, run=_run_bundle)
@@ -58,7 +133,13 @@ def _register_authority(subparsers) -> None:
 def _run_authority(args: argparse.Namespace) -> None:
     from repoctx.protocol import op_authority
 
-    print(json.dumps(op_authority(args.task, repo_root=args.repo, include=args.include), indent=2))
+    result = _run_op(
+        "authority",
+        args.task,
+        args.repo,
+        lambda: op_authority(args.task, repo_root=args.repo, include=args.include),
+    )
+    print(json.dumps(result, indent=2))
 
 
 authority_cmd = SimpleNamespace(NAME="authority", register=_register_authority, run=_run_authority)
@@ -75,7 +156,8 @@ def _register_scope(subparsers) -> None:
 def _run_scope(args: argparse.Namespace) -> None:
     from repoctx.protocol import op_scope
 
-    print(json.dumps(op_scope(args.task, repo_root=args.repo), indent=2))
+    result = _run_op("scope", args.task, args.repo, lambda: op_scope(args.task, repo_root=args.repo))
+    print(json.dumps(result, indent=2))
 
 
 scope_cmd = SimpleNamespace(NAME="scope", register=_register_scope, run=_run_scope)
@@ -93,7 +175,13 @@ def _register_validate_plan(subparsers) -> None:
 def _run_validate_plan(args: argparse.Namespace) -> None:
     from repoctx.protocol import op_validate_plan
 
-    print(json.dumps(op_validate_plan(args.task, args.changed, repo_root=args.repo), indent=2))
+    result = _run_op(
+        "validate_plan",
+        args.task,
+        args.repo,
+        lambda: op_validate_plan(args.task, args.changed, repo_root=args.repo),
+    )
+    print(json.dumps(result, indent=2))
 
 
 validate_plan_cmd = SimpleNamespace(NAME="validate-plan", register=_register_validate_plan, run=_run_validate_plan)
@@ -111,7 +199,13 @@ def _register_risk_report(subparsers) -> None:
 def _run_risk_report(args: argparse.Namespace) -> None:
     from repoctx.protocol import op_risk_report
 
-    print(json.dumps(op_risk_report(args.task, args.changed, repo_root=args.repo), indent=2))
+    result = _run_op(
+        "risk_report",
+        args.task,
+        args.repo,
+        lambda: op_risk_report(args.task, args.changed, repo_root=args.repo),
+    )
+    print(json.dumps(result, indent=2))
 
 
 risk_report_cmd = SimpleNamespace(NAME="risk-report", register=_register_risk_report, run=_run_risk_report)
@@ -147,18 +241,19 @@ def _run_refresh(args: argparse.Namespace) -> None:
     current_scope = None
     if args.current_scope_json:
         current_scope = json.loads(args.current_scope_json)
-    print(
-        json.dumps(
-            op_refresh(
-                args.task,
-                args.changed,
-                current_scope,
-                repo_root=args.repo,
-                claude_md_nudge=getattr(args, "claude_md_nudge", True),
-            ),
-            indent=2,
-        )
+    result = _run_op(
+        "refresh",
+        args.task,
+        args.repo,
+        lambda: op_refresh(
+            args.task,
+            args.changed,
+            current_scope,
+            repo_root=args.repo,
+            claude_md_nudge=getattr(args, "claude_md_nudge", True),
+        ),
     )
+    print(json.dumps(result, indent=2))
 
 
 refresh_cmd = SimpleNamespace(NAME="refresh", register=_register_refresh, run=_run_refresh)
@@ -183,7 +278,13 @@ def _register_detect_changes(subparsers) -> None:
 def _run_detect_changes(args: argparse.Namespace) -> None:
     from repoctx.protocol import op_detect_changes
 
-    print(json.dumps(op_detect_changes(args.changed, repo_root=args.repo), indent=2))
+    result = _run_op(
+        "detect_changes",
+        "",
+        args.repo,
+        lambda: op_detect_changes(args.changed, repo_root=args.repo),
+    )
+    print(json.dumps(result, indent=2))
 
 
 detect_changes_cmd = SimpleNamespace(NAME="detect-changes", register=_register_detect_changes, run=_run_detect_changes)
