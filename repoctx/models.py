@@ -17,6 +17,12 @@ class FileRecord:
     # no detector matched. See `repoctx/subkinds.py`.
     subkind: str = ""
     content: str = ""
+    # Import-bearing lines harvested from the *untruncated* file text (Python
+    # only; empty otherwise). ``content`` is capped at ``max_file_bytes``, so
+    # in a large module every import past the cap was invisible to the
+    # dependency graph — and big files are exactly the central hubs. The full
+    # text is already read before slicing, so this costs no extra I/O.
+    import_source: str = ""
     doc_score: float = 0.0
 
     @property

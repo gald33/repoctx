@@ -5,7 +5,17 @@ from pathlib import Path, PurePosixPath
 from repoctx.config import DEFAULT_CONFIG, RepoCtxConfig
 from repoctx.models import DependencyGraph, RankedPath, RepositoryIndex
 
-PYTHON_FROM_RE = re.compile(r"^\s*from\s+([.\w]+)\s+import\s+", re.MULTILINE)
+# Group 1 is the package path, group 2 the imported-names clause. Capturing the
+# names matters: ``from pkg import mod`` imports a *submodule*, and resolving
+# only group 1 reaches ``pkg/__init__.py`` while missing ``pkg/mod.py`` — the
+# real dependency. Line-scoped ([ \t], `[^\n]*`) on purpose; a `\s`-based class
+# here is what let the sibling import regex swallow whole blocks (see 1.9.0).
+# Known limitation: a parenthesized clause continued onto later lines yields
+# only the first line's names, so those submodule edges are missed (the package
+# edge is still added, i.e. no worse than before).
+PYTHON_FROM_RE = re.compile(
+    r"^[ \t]*from[ \t]+([.\w]+)[ \t]+import[ \t]+([^\n]*)", re.MULTILINE
+)
 # Horizontal whitespace only. A bare ``\s`` in the character class matches
 # newlines, so one ``import os`` greedily swallowed every following line until
 # a character outside ``[.\w\s,]`` — capturing whole ``from x import a, b,``
@@ -25,7 +35,13 @@ def build_dependency_graph(index: RepositoryIndex) -> DependencyGraph:
     python_modules = _build_python_module_map(index)
 
     for record in index.code_files + index.test_files:
-        for dependency in _extract_dependencies(record.path, record.content, index, python_modules):
+        for dependency in _extract_dependencies(
+            record.path,
+            record.content,
+            index,
+            python_modules,
+            import_source=record.import_source,
+        ):
             if dependency == record.path:
                 continue
             forward[record.path].add(dependency)
@@ -81,9 +97,15 @@ def _extract_dependencies(
     content: str,
     index: RepositoryIndex,
     python_modules: dict[str, str],
+    import_source: str = "",
 ) -> set[str]:
     if path.endswith(".py"):
-        return _extract_python_dependencies(path, content, python_modules)
+        # `content` is truncated at `max_file_bytes`; `import_source` (set only
+        # when that truncation actually dropped something) carries the import
+        # lines from the whole file so late imports still register.
+        return _extract_python_dependencies(
+            path, import_source or content, python_modules
+        )
     if path.endswith((".ts", ".tsx", ".js", ".jsx")):
         return _extract_ts_dependencies(path, content, index)
     return set()
@@ -99,14 +121,34 @@ def _extract_python_dependencies(
     is_package = path.endswith("__init__.py")
 
     for match in PYTHON_FROM_RE.finditer(content):
+        package_path = match.group(1)
         resolved = _resolve_python_import(
-            import_path=match.group(1),
+            import_path=package_path,
             current_parts=module_parts,
             is_package=is_package,
             module_map=python_modules,
         )
         if resolved:
             dependencies.add(resolved)
+
+        # ``from pkg import mod`` depends on ``pkg/mod.py``, not just
+        # ``pkg/__init__.py``. Resolve each imported name as a candidate
+        # submodule. A name that isn't a module (``from pkg import CONSTANT``)
+        # simply doesn't resolve, so this cannot invent edges.
+        for name in _from_import_names(match.group(2)):
+            submodule_path = (
+                package_path + name
+                if package_path.endswith(".")  # ``from . import mod`` -> ``.mod``
+                else f"{package_path}.{name}"
+            )
+            submodule = _resolve_python_import(
+                import_path=submodule_path,
+                current_parts=module_parts,
+                is_package=is_package,
+                module_map=python_modules,
+            )
+            if submodule:
+                dependencies.add(submodule)
 
     for match in PYTHON_IMPORT_RE.finditer(content):
         for item in match.group(1).split(","):
@@ -121,6 +163,25 @@ def _extract_python_dependencies(
                 dependencies.add(resolved)
 
     return dependencies
+
+
+def _from_import_names(clause: str) -> list[str]:
+    """Names bound by the ``import`` clause of a ``from X import ...`` line.
+
+    ``a, b as c`` -> ``["a", "b"]`` (the alias is never the module). Comments,
+    parens, ``*``, and backslash continuations are dropped; anything that isn't
+    a bare identifier is ignored, so junk can never reach the resolver.
+    """
+    text = clause.split("#", 1)[0].replace("(", " ").replace(")", " ")
+    names: list[str] = []
+    for item in text.split(","):
+        parts = item.strip().split()
+        if not parts:
+            continue
+        name = parts[0]
+        if name.isidentifier():
+            names.append(name)
+    return names
 
 
 def _resolve_python_import(
