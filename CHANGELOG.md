@@ -6,6 +6,47 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.10.0] — 2026-07-14
+
+Two dependency-graph blind spots, both found by pointing repoctx at its own
+code and not believing the answer. Neither ever raised an error — they just
+returned a smaller graph than reality, so `detect_changes` understated blast
+radius and bundles quietly omitted related files. On repoctx itself the fixes
+recover **318 → 346 edges (~9%)**.
+
+### Fixed — `from package import submodule` created no edge to the submodule
+
+`PYTHON_FROM_RE` captured only the package path, so `from pkg import mod`
+produced an edge to `pkg/__init__.py` and **none** to `pkg/mod.py` — the actual
+dependency. The idiom is ubiquitous; repoctx uses it for
+`from repoctx import reporting` in `telemetry.py`, `mcp_server.py`,
+`commands/protocol_ops.py`, and `main.py`. Asked who depends on
+`reporting.py`, repoctx answered "only `tests/test_reporting.py`."
+
+The regex now also captures the imported-names clause, and each name is
+resolved as a candidate submodule alongside the package. Names that aren't
+modules (`from pkg import CONSTANT`) simply don't resolve, so no false edges
+are invented; `as` aliases resolve the module, not the alias; relative forms
+(`from . import mod`, `from .. import other`) work. Known limitation: a
+parenthesized clause continued across lines yields only the first line's names
+(the package edge is still added, so no worse than before).
+
+### Fixed — imports below the content-truncation cap were invisible
+
+`FileRecord.content` is capped at `max_file_bytes` (16 KB) and the graph read
+imports from that truncated text, so in any larger module every import past the
+cap was dropped — and large files are precisely the central hubs. In repoctx,
+12 of 137 indexed `.py` files hit the cap, including `mcp_server.py`,
+`embeddings.py`, `telemetry.py`, and `reporting.py`. `mcp_server.py` imports
+`reporting` at lines 543/1014/1101, all past 16 KB, so that dependency did not
+exist in the graph at all.
+
+`FileRecord` now carries `import_source`: the import-bearing lines harvested
+from the **untruncated** text, populated only when truncation actually dropped
+something (Python only — the TS extractor matches across lines and can't be
+line-filtered safely). The full text was already read before slicing, so this
+costs no extra I/O and adds ~1 KB for a 16 KB-capped file.
+
 ### Fixed — CLI protocol ops recorded no telemetry
 
 The v2 protocol ops recorded a `protocol_op` event only on the MCP surface.

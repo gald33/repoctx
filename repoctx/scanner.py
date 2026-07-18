@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from pathlib import Path, PurePosixPath
 
 from repoctx.config import DEFAULT_CONFIG, DOC_PRIORITY, RepoCtxConfig
@@ -22,8 +23,8 @@ def scan_repository(
 
     for path in _iter_files(root, config):
         rel_path = path.relative_to(root).as_posix()
-        content = _read_text(path, config.max_file_bytes)
-        record = build_file_record(rel_path, content, root, config)
+        content, import_source = _read_text_and_imports(path, config.max_file_bytes)
+        record = build_file_record(rel_path, content, root, config, import_source=import_source)
         _add_record(index, record)
 
     index.docs.sort(key=lambda item: (-item.doc_score, item.path))
@@ -35,6 +36,7 @@ def build_file_record(
     content: str,
     root: str | Path,
     config: RepoCtxConfig = DEFAULT_CONFIG,
+    import_source: str = "",
 ) -> FileRecord:
     """Classify a single file into a :class:`FileRecord` from its content.
 
@@ -54,6 +56,7 @@ def build_file_record(
         kind=kind,
         subkind=subkind,
         content=content,
+        import_source=import_source,
         doc_score=doc_score,
     )
 
@@ -157,3 +160,33 @@ def _read_text(path: Path, max_bytes: int) -> str:
     except OSError as exc:
         logger.warning("Failed to read %s: %s", path, exc)
         return ""
+
+
+# A Python import statement always begins its logical line with `import` or
+# `from` (indented for function-local/deferred imports, which this codebase
+# uses heavily).
+_PY_IMPORT_LINE_RE = re.compile(r"^[ \t]*(?:import|from)[ \t]")
+
+
+def _read_text_and_imports(path: Path, max_bytes: int) -> tuple[str, str]:
+    """Return ``(content, import_source)`` in a single read.
+
+    ``content`` is capped at ``max_bytes`` as before. ``import_source`` holds
+    the import-bearing lines from the *whole* file, so the dependency graph
+    still sees imports that live past the cap in a large module. Python only —
+    the TS extractor matches across lines and can't be line-filtered safely.
+    """
+    try:
+        full = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError as exc:
+        logger.warning("Failed to read %s: %s", path, exc)
+        return "", ""
+
+    content = full[:max_bytes]
+    if path.suffix.lower() != ".py" or len(full) <= max_bytes:
+        # Nothing truncated (or not Python): `content` already has every import.
+        return content, ""
+    imports = "\n".join(
+        line for line in full.splitlines() if _PY_IMPORT_LINE_RE.match(line)
+    )
+    return content, imports

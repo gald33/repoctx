@@ -116,3 +116,120 @@ def test_import_with_trailing_comma_is_skipped_not_crashed(tmp_path: Path) -> No
     index = scan_repository(tmp_path)
     graph = build_dependency_graph(index)  # must not raise
     assert "pkg/alpha.py" in graph.forward.get("pkg/main.py", set())
+
+
+# ---- `from package import submodule` edges -----------------------------------
+#
+# `PYTHON_FROM_RE` captured only the package path, so `from pkg import mod`
+# produced an edge to `pkg/__init__.py` and none to `pkg/mod.py`. The idiom is
+# ubiquitous — repoctx uses it for `from repoctx import reporting` in both
+# telemetry.py and mcp_server.py — so `detect_changes` understated blast radius
+# and bundles omitted genuinely related files. Silent: no error, just a
+# missing edge.
+
+
+def _graph_for(tmp_path: Path) -> dict:
+    return build_dependency_graph(scan_repository(tmp_path)).forward
+
+
+def _make_pkg(tmp_path: Path) -> None:
+    write_file(tmp_path / "pkg" / "__init__.py", "")
+    write_file(tmp_path / "pkg" / "mod.py", "VALUE = 1\n")
+    write_file(tmp_path / "pkg" / "other.py", "X = 2\n")
+
+
+def test_from_package_import_submodule_creates_edge(tmp_path: Path) -> None:
+    _make_pkg(tmp_path)
+    write_file(tmp_path / "app.py", "from pkg import mod\n")
+
+    edges = _graph_for(tmp_path).get("app.py", set())
+    assert "pkg/mod.py" in edges, "submodule edge missing"
+    assert "pkg/__init__.py" in edges, "package edge should still be present"
+
+
+def test_from_package_import_multiple_submodules(tmp_path: Path) -> None:
+    _make_pkg(tmp_path)
+    write_file(tmp_path / "app.py", "from pkg import mod, other as o  # noqa\n")
+
+    edges = _graph_for(tmp_path).get("app.py", set())
+    assert {"pkg/mod.py", "pkg/other.py"} <= edges
+
+
+def test_from_package_import_non_module_makes_no_edge(tmp_path: Path) -> None:
+    """A plain symbol must not invent an edge."""
+    _make_pkg(tmp_path)
+    write_file(tmp_path / "app.py", "from pkg import SOME_CONSTANT\n")
+
+    edges = _graph_for(tmp_path).get("app.py", set())
+    assert edges == {"pkg/__init__.py"}
+
+
+def test_relative_from_import_submodule(tmp_path: Path) -> None:
+    _make_pkg(tmp_path)
+    write_file(tmp_path / "pkg" / "rel.py", "from . import mod\n")
+    write_file(tmp_path / "pkg" / "sub" / "__init__.py", "")
+    write_file(tmp_path / "pkg" / "sub" / "up.py", "from .. import other\n")
+
+    forward = _graph_for(tmp_path)
+    assert "pkg/mod.py" in forward.get("pkg/rel.py", set())
+    assert "pkg/other.py" in forward.get("pkg/sub/up.py", set())
+
+
+def test_direct_submodule_import_still_resolves(tmp_path: Path) -> None:
+    """Regression guard on the form that already worked."""
+    _make_pkg(tmp_path)
+    write_file(tmp_path / "app.py", "from pkg.mod import VALUE\n")
+
+    assert "pkg/mod.py" in _graph_for(tmp_path).get("app.py", set())
+
+
+def test_deferred_function_local_from_import_is_seen(tmp_path: Path) -> None:
+    """Imports inside a function body count — repoctx defers many itself."""
+    _make_pkg(tmp_path)
+    write_file(
+        tmp_path / "app.py",
+        "def go():\n    from pkg import mod\n    return mod.VALUE\n",
+    )
+
+    assert "pkg/mod.py" in _graph_for(tmp_path).get("app.py", set())
+
+
+# ---- Imports past the content-truncation cap ---------------------------------
+#
+# `scanner` caps `FileRecord.content` at `max_file_bytes` (16 KB). The graph
+# read imports from that truncated text, so in a large module every import
+# below the cap was invisible — and large files are exactly the central hubs.
+# repoctx's own mcp_server.py imports `reporting` at lines 543/1014/1101, all
+# past the cap, so its dependency on reporting.py did not exist in the graph.
+
+
+def test_imports_past_truncation_cap_are_still_seen(tmp_path: Path) -> None:
+    from repoctx.config import DEFAULT_CONFIG
+
+    _make_pkg(tmp_path)
+    filler = "# " + ("x" * 98) + "\n"
+    padding = filler * ((DEFAULT_CONFIG.max_file_bytes // len(filler)) + 20)
+    # A deferred import placed deliberately *after* the truncation point.
+    write_file(
+        tmp_path / "big.py",
+        "HEADER = 1\n" + padding + "\ndef late():\n    from pkg import mod\n    return mod\n",
+    )
+
+    index = scan_repository(tmp_path)
+    record = index.records["big.py"]
+    assert len(record.content) == DEFAULT_CONFIG.max_file_bytes, "fixture must truncate"
+    assert "from pkg import mod" not in record.content, "import must be past the cap"
+
+    edges = build_dependency_graph(index).forward.get("big.py", set())
+    assert "pkg/mod.py" in edges, "import past the truncation cap was dropped"
+
+
+def test_import_source_only_populated_when_truncated(tmp_path: Path) -> None:
+    """Small files carry no extra payload — content already has every import."""
+    _make_pkg(tmp_path)
+    write_file(tmp_path / "small.py", "from pkg import mod\n")
+
+    index = scan_repository(tmp_path)
+    assert index.records["small.py"].import_source == ""
+    # ...and the edge still resolves from `content`.
+    assert "pkg/mod.py" in build_dependency_graph(index).forward.get("small.py", set())
