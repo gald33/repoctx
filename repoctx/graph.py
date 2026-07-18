@@ -1,3 +1,4 @@
+import ast
 import re
 from collections import defaultdict
 from pathlib import Path, PurePosixPath
@@ -115,6 +116,83 @@ def _extract_python_dependencies(
     content: str,
     python_modules: dict[str, str],
 ) -> set[str]:
+    """Python imports in ``content``, resolved against ``python_modules``.
+
+    Parses with :mod:`ast` and falls back to the regex extractor only when the
+    source won't parse. Every import bug this module has shipped — a ``\\s``
+    class swallowing newlines, an unguarded ``[0]`` on an empty segment,
+    ``from pkg import mod`` missing the submodule, multi-line clauses
+    contributing nothing — was a regex failing to model Python's grammar.
+    ``ast`` models it by construction, and gets conditional, function-local,
+    ``__future__``, aliased, and relative imports for free.
+    """
+    try:
+        tree = ast.parse(content)
+    except (SyntaxError, ValueError):
+        # Unparseable: a syntax error, Python 2, or a truncated fragment. The
+        # regex extractor is lossy but tolerant, which is what's wanted here.
+        return _extract_python_dependencies_regex(path, content, python_modules)
+
+    dependencies: set[str] = set()
+    module_parts = _python_module_parts(path)
+    is_package = path.endswith("__init__.py")
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            # ``import a.b as c`` -> alias.name is the module path, never the
+            # alias, so this is already the right value to resolve.
+            for alias in node.names:
+                resolved = python_modules.get(alias.name)
+                if resolved:
+                    dependencies.add(resolved)
+
+        elif isinstance(node, ast.ImportFrom):
+            # ``node.level`` is the leading-dot count; ``node.module`` is None
+            # for ``from . import x``.
+            package_path = "." * node.level + (node.module or "")
+            resolved = _resolve_python_import(
+                import_path=package_path,
+                current_parts=module_parts,
+                is_package=is_package,
+                module_map=python_modules,
+            )
+            if resolved:
+                dependencies.add(resolved)
+
+            # ``from pkg import mod`` depends on ``pkg/mod.py``, not just
+            # ``pkg/__init__.py``. A name that isn't a module simply doesn't
+            # resolve, so this cannot invent edges.
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                submodule_path = (
+                    package_path + alias.name
+                    if package_path.endswith(".")  # ``from . import mod``
+                    else f"{package_path}.{alias.name}"
+                )
+                submodule = _resolve_python_import(
+                    import_path=submodule_path,
+                    current_parts=module_parts,
+                    is_package=is_package,
+                    module_map=python_modules,
+                )
+                if submodule:
+                    dependencies.add(submodule)
+
+    return dependencies
+
+
+def _extract_python_dependencies_regex(
+    path: str,
+    content: str,
+    python_modules: dict[str, str],
+) -> set[str]:
+    """Best-effort extraction for source that won't parse.
+
+    Retained as the fallback behind :func:`_extract_python_dependencies`. It
+    cannot see conditional or oddly-formatted imports the way ``ast`` does, but
+    it degrades instead of returning nothing.
+    """
     dependencies: set[str] = set()
     module_parts = _python_module_parts(path)
     is_package = path.endswith("__init__.py")
