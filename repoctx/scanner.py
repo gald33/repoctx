@@ -83,7 +83,17 @@ def _iter_files(root: Path, config: RepoCtxConfig) -> list[Path]:
     ignored = set(config.ignored_dirs)
 
     for current_root, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(name for name in dirnames if name not in ignored)
+        # Prune ignored names *and* virtualenvs detected structurally. The name
+        # blocklist only knows ``venv``/``.venv``, so a virtualenv called
+        # anything else (``myenv``, ``env311``, …) let its whole vendored
+        # site-packages tree into the index — thousands of third-party files
+        # that aren't the user's code. PEP 405 guarantees a venv root contains
+        # ``pyvenv.cfg``, which is name-independent and costs one stat per dir.
+        dirnames[:] = sorted(
+            name
+            for name in dirnames
+            if name not in ignored and not (Path(current_root) / name / "pyvenv.cfg").exists()
+        )
         for filename in sorted(filenames):
             path = Path(current_root) / filename
             if path.suffix.lower() not in config.supported_extensions:

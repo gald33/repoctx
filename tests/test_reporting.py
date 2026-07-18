@@ -41,6 +41,10 @@ def _reset_module(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("REPOCTX_REPORTING_DIR", raising=False)
     monkeypatch.delenv("REPOCTX_REPORTING_ENDPOINT", raising=False)
     monkeypatch.delenv("REPOCTX_DOGFOOD", raising=False)
+    # Endpoint falls back to the real production URL once the override is
+    # gone, so keep the enqueue-path autoflush off. Tests that exercise it
+    # turn it on explicitly and stub the transport.
+    monkeypatch.setenv("REPOCTX_REPORTING_AUTOFLUSH", "off")
 
 
 @pytest.fixture
@@ -268,6 +272,101 @@ def test_build_upload_payload_omits_repo_fingerprint_without_git(
     local = {"event_type": "protocol_op", "op": "bundle"}
     upload = build_upload_payload(local, repo_root=non_git, state_dir=state_dir)
     assert "repo_fingerprint" not in upload
+
+
+# ---- Opportunistic flush ----------------------------------------------------
+#
+# Regression cover for the bug that made the whole upload lane dead weight:
+# the only automatic flush was an atexit hook, and the MCP server — a
+# long-lived process killed with SIGTERM — never runs atexit handlers. Events
+# queued forever (215 events / 6 weeks / 0 uploads observed in the wild).
+
+
+@pytest.fixture
+def _autoflush_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("REPOCTX_REPORTING_AUTOFLUSH", "1")
+
+
+def _stub_flush(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Replace the real flush with a recorder; returns the call log."""
+    calls: list[int] = []
+
+    def fake_flush(**kwargs: Any) -> PostResult:
+        calls.append(1)
+        return PostResult(sent=1, accepted=1, rejected=0, error=None)
+
+    monkeypatch.setattr(reporting, "flush", fake_flush)
+    return calls
+
+
+def _wait_for(predicate, timeout: float = 2.0) -> bool:
+    import time as _time
+
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        if predicate():
+            return True
+        _time.sleep(0.01)
+    return predicate()
+
+
+def test_enqueue_triggers_background_flush(
+    canary_channel: None, state_dir: Path, _autoflush_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _stub_flush(monkeypatch)
+    enqueue_if_enabled({"event_type": "protocol_op", "op": "bundle"}, state_dir=state_dir)
+    assert _wait_for(lambda: len(calls) >= 1), "enqueue did not trigger a flush"
+
+
+def test_autoflush_can_be_disabled(
+    canary_channel: None, state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("REPOCTX_REPORTING_AUTOFLUSH", "off")
+    calls = _stub_flush(monkeypatch)
+    enqueue_if_enabled({"event_type": "protocol_op", "op": "bundle"}, state_dir=state_dir)
+    import time as _time
+
+    _time.sleep(0.2)
+    assert calls == [], "autoflush should be inert when disabled"
+
+
+def test_maybe_flush_async_noop_when_reporting_disabled(
+    stable_channel: None, state_dir: Path, _autoflush_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _stub_flush(monkeypatch)
+    # Stable + no opt-in => disabled; a stray queue file must not upload.
+    assert reporting.maybe_flush_async(state_dir, queue_bytes=999_999) is False
+    assert calls == []
+
+
+def test_maybe_flush_async_skips_when_queue_empty(
+    canary_channel: None, state_dir: Path, _autoflush_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _stub_flush(monkeypatch)
+    assert reporting.maybe_flush_async(state_dir, queue_bytes=0) is False
+    assert calls == []
+
+
+def test_maybe_flush_async_single_flights(
+    canary_channel: None, state_dir: Path, _autoflush_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A burst of enqueues must not spawn a thread each."""
+    import threading as _threading
+
+    release = _threading.Event()
+    started = []
+
+    def slow_flush(**kwargs: Any) -> PostResult:
+        started.append(1)
+        release.wait(timeout=2.0)
+        return PostResult(sent=1, accepted=1, rejected=0, error=None)
+
+    monkeypatch.setattr(reporting, "flush", slow_flush)
+    assert reporting.maybe_flush_async(state_dir, queue_bytes=999_999) is True
+    assert _wait_for(lambda: len(started) == 1)
+    # Second call while the first is in flight is refused.
+    assert reporting.maybe_flush_async(state_dir, queue_bytes=999_999) is False
+    release.set()
 
 
 # ---- Dogfood mode -----------------------------------------------------------

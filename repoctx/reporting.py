@@ -51,6 +51,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -78,6 +79,9 @@ SENT_LOG_FILENAME = "sent.log"
 
 DEFAULT_MAX_QUEUE_BYTES = 1_048_576  # 1 MB
 DEFAULT_FLUSH_BATCH_BYTES = 65_536  # 64 KB — opportunistic flush threshold
+# Time-based backstop for the opportunistic flush. Size alone is not enough: a
+# light user takes weeks to reach 64 KB, and until then nothing ships.
+DEFAULT_FLUSH_INTERVAL_SECONDS = 300.0  # 5 min
 DEFAULT_HTTP_TIMEOUT_SECONDS = 5.0
 ATEXIT_FLUSH_TIMEOUT_SECONDS = 2.0
 
@@ -142,6 +146,9 @@ DOGFOOD_MAX_TRACEBACK_CHARS = 8_000
 
 _CACHED_INSTALL_ID: str | None = None
 _ATEXIT_REGISTERED = False
+_FLUSH_LOCK = threading.Lock()
+_FLUSH_IN_FLIGHT = False
+_LAST_FLUSH_MONOTONIC: float | None = None
 
 
 # ---- Channel + env-var helpers ---------------------------------------------
@@ -172,6 +179,19 @@ def _env_kill_switch() -> bool | None:
     if norm in {"on", "1", "true", "yes", "enable", "enabled"}:
         return True
     return None
+
+
+def _autoflush_enabled() -> bool:
+    """False when ``REPOCTX_REPORTING_AUTOFLUSH`` is set to an off-ish value.
+
+    The background flush does real network I/O from the enqueue path, so test
+    suites (and anyone who wants uploads to happen only on an explicit
+    ``reporting flush``) need a way to keep it inert.
+    """
+    raw = os.environ.get("REPOCTX_REPORTING_AUTOFLUSH")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in {"off", "0", "false", "no", "disable", "disabled"}
 
 
 def is_dogfood() -> bool:
@@ -642,6 +662,9 @@ def enqueue_if_enabled(
     _truncate_queue_to_fit(dir_path, state.max_queue_bytes)
 
     _ensure_atexit_flush(state_dir)
+    # atexit alone never fires for the long-lived MCP server (SIGTERM), so the
+    # queue has to drain from the enqueue path too.
+    maybe_flush_async(state_dir, queue_bytes=_queue_size_bytes(dir_path))
     return True
 
 
@@ -892,6 +915,63 @@ def _ensure_atexit_flush(state_dir: str | Path | None) -> None:
     _ATEXIT_REGISTERED = True
 
 
+def maybe_flush_async(
+    state_dir: str | Path | None = None,
+    *,
+    queue_bytes: int | None = None,
+) -> bool:
+    """Kick off a background flush when the queue is large enough or stale.
+
+    The ``atexit`` hook is not sufficient on its own. The MCP server is a
+    long-lived process terminated with SIGTERM when a session ends, and Python
+    does **not** run ``atexit`` handlers on SIGTERM — so every event a server
+    enqueued sat in the queue forever and never uploaded. (Observed in the
+    wild: 215 events accumulated over six weeks with zero uploads.)
+
+    Returns True if a flush thread was started. Never raises, never blocks the
+    caller on network I/O — the flush runs on a daemon thread, and a single
+    in-flight guard keeps a burst of enqueues from spawning a thread each.
+    """
+    global _FLUSH_IN_FLIGHT, _LAST_FLUSH_MONOTONIC
+
+    if not _autoflush_enabled():
+        return False
+    if not is_enabled(state_dir):
+        return False
+
+    dir_path = get_state_dir(state_dir)
+    if queue_bytes is None:
+        queue_bytes = _queue_size_bytes(dir_path)
+    if queue_bytes <= 0:
+        return False
+
+    now = time.monotonic()
+    with _FLUSH_LOCK:
+        if _FLUSH_IN_FLIGHT:
+            return False
+        stale = (
+            _LAST_FLUSH_MONOTONIC is None
+            or (now - _LAST_FLUSH_MONOTONIC) >= DEFAULT_FLUSH_INTERVAL_SECONDS
+        )
+        if queue_bytes < DEFAULT_FLUSH_BATCH_BYTES and not stale:
+            return False
+        _FLUSH_IN_FLIGHT = True
+        _LAST_FLUSH_MONOTONIC = now
+
+    def _run() -> None:
+        global _FLUSH_IN_FLIGHT
+        try:
+            flush(state_dir=state_dir)
+        except Exception:  # noqa: BLE001 — a background flush must never raise
+            logger.debug("reporting: background flush failed", exc_info=True)
+        finally:
+            with _FLUSH_LOCK:
+                _FLUSH_IN_FLIGHT = False
+
+    threading.Thread(target=_run, daemon=True, name="repoctx-reporting-flush").start()
+    return True
+
+
 # ---- Canary disclosure ------------------------------------------------------
 
 CANARY_NOTICE = (
@@ -936,6 +1016,8 @@ def maybe_show_canary_notice(
 
 def reset_for_test() -> None:
     """Reset module-level caches. Tests call this between cases."""
-    global _ATEXIT_REGISTERED
+    global _ATEXIT_REGISTERED, _FLUSH_IN_FLIGHT, _LAST_FLUSH_MONOTONIC
     _reset_install_id_cache()
     _ATEXIT_REGISTERED = False
+    _FLUSH_IN_FLIGHT = False
+    _LAST_FLUSH_MONOTONIC = None

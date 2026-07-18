@@ -6,7 +6,14 @@ from repoctx.config import DEFAULT_CONFIG, RepoCtxConfig
 from repoctx.models import DependencyGraph, RankedPath, RepositoryIndex
 
 PYTHON_FROM_RE = re.compile(r"^\s*from\s+([.\w]+)\s+import\s+", re.MULTILINE)
-PYTHON_IMPORT_RE = re.compile(r"^\s*import\s+([.\w\s,]+)", re.MULTILINE)
+# Horizontal whitespace only. A bare ``\s`` in the character class matches
+# newlines, so one ``import os`` greedily swallowed every following line until
+# a character outside ``[.\w\s,]`` — capturing whole ``from x import a, b,``
+# blocks. That produced bogus module names (a symbol like ``config`` resolving
+# against a real ``config.py``, creating false dependency edges) and, when the
+# captured run ended on a trailing comma, an empty segment that crashed the
+# split below with IndexError — taking down every protocol op on that repo.
+PYTHON_IMPORT_RE = re.compile(r"^[ \t]*import[ \t]+([.\w][.\w,\t ]*)", re.MULTILINE)
 TS_IMPORT_RE = re.compile(
     r"""(?:import|export)\s+(?:[^'"]+?\s+from\s+)?['"]([^'"]+)['"]|require\(\s*['"]([^'"]+)['"]\s*\)"""
 )
@@ -102,9 +109,14 @@ def _extract_python_dependencies(
             dependencies.add(resolved)
 
     for match in PYTHON_IMPORT_RE.finditer(content):
-        modules = [item.strip().split()[0] for item in match.group(1).split(",")]
-        for module_name in modules:
-            resolved = python_modules.get(module_name)
+        for item in match.group(1).split(","):
+            # ``import a as b`` -> take the module, not the alias. An empty
+            # segment (trailing comma, stray separator) yields no parts and is
+            # skipped rather than indexed into.
+            parts = item.strip().split()
+            if not parts:
+                continue
+            resolved = python_modules.get(parts[0])
             if resolved:
                 dependencies.add(resolved)
 
