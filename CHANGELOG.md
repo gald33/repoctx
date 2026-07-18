@@ -6,6 +6,8 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.12.0] — 2026-07-18
+
 ### Changed — Python imports are parsed with `ast`, not regex
 
 Four import bugs shipped in a single day, every one the same shape: a regex
