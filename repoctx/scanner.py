@@ -186,7 +186,41 @@ def _read_text_and_imports(path: Path, max_bytes: int) -> tuple[str, str]:
     if path.suffix.lower() != ".py" or len(full) <= max_bytes:
         # Nothing truncated (or not Python): `content` already has every import.
         return content, ""
-    imports = "\n".join(
-        line for line in full.splitlines() if _PY_IMPORT_LINE_RE.match(line)
-    )
-    return content, imports
+    return content, _harvest_import_lines(full)
+
+
+# Bound on how far a single import statement may be followed. Matches
+# `graph._MAX_CONTINUATION_LINES`.
+_MAX_CONTINUATION_LINES = 50
+
+
+def _harvest_import_lines(text: str) -> str:
+    """Import statements from ``text``, continuation lines included.
+
+    A plain line filter would keep ``from x import (`` but drop the indented
+    names beneath it, so a parenthesized import would arrive at the graph with
+    an empty clause. Statements are emitted contiguously, so the graph's own
+    continuation scan sees them exactly as written.
+    """
+    lines = text.splitlines()
+    out: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if not _PY_IMPORT_LINE_RE.match(line):
+            index += 1
+            continue
+
+        out.append(line)
+        depth = line.count("(") - line.count(")")
+        continued = line.rstrip().endswith("\\")
+        index += 1
+        followed = 0
+        while (depth > 0 or continued) and index < len(lines) and followed < _MAX_CONTINUATION_LINES:
+            nxt = lines[index]
+            out.append(nxt)
+            depth += nxt.count("(") - nxt.count(")")
+            continued = nxt.rstrip().endswith("\\")
+            index += 1
+            followed += 1
+    return "\n".join(out)
