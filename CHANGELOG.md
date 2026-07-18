@@ -6,6 +6,27 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Fixed — CLI protocol ops recorded no telemetry
+
+The v2 protocol ops recorded a `protocol_op` event only on the MCP surface.
+`record_protocol_op` was called from `_run_op` in `mcp_server.py`
+(`surface="mcp"`), but the CLI entrypoints in `commands/protocol_ops.py`
+(`bundle`, `authority`, `scope`, `validate-plan`, `risk-report`, `refresh`,
+`detect-changes`) never called it — so all CLI usage was invisible to the
+reporting/ingest pipeline, CLI failures produced no dogfood tracebacks (the
+1.8.0 dogfood lane only covered MCP), and the per-repo retrieval tuner added
+in 1.4 saw only MCP-sourced events, biasing its data. Surfaced while verifying
+the 1.9.0 autoflush fix: `repoctx scope "..."` under `REPOCTX_DOGFOOD=1`
+produced zero telemetry events and zero uploads.
+
+- A shared `_run_op` helper in `commands/protocol_ops.py` now wraps every CLI
+  protocol op, emitting `record_protocol_op(surface="cli", ...)` on success and
+  failure. It mirrors the MCP recorder, including the dogfood-only
+  message/traceback capture via `reporting.capture_exc_detail(exc)` on the
+  failure path. Op names use the MCP-shared underscore form
+  (`validate_plan`, `risk_report`, `detect_changes`) so CLI and MCP events
+  aggregate together. Telemetry failures never mask the op result.
+
 ## [1.9.0] — 2026-07-14
 
 Four fixes, all found by the dogfood lane on its first day. The reporting bug
