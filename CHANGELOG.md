@@ -6,6 +6,8 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.11.0] — 2026-07-18
+
 ### Fixed — multi-line `from X import (...)` clauses lost their submodule edges
 
 1.10.0 resolved imported names to submodules but was deliberately line-scoped,
