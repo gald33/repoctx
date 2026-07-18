@@ -233,3 +233,85 @@ def test_import_source_only_populated_when_truncated(tmp_path: Path) -> None:
     assert index.records["small.py"].import_source == ""
     # ...and the edge still resolves from `content`.
     assert "pkg/mod.py" in build_dependency_graph(index).forward.get("small.py", set())
+
+
+# ---- Continued (multi-line) from-import clauses -------------------------------
+#
+# A parenthesized or backslash-continued clause carries names past the matched
+# line. 1.10.0 shipped line-scoped and knowingly missed them; `_complete_from_
+# clause` now follows the continuation with an explicit bounded scan (never a
+# wider regex — that is what caused the 1.9.0 crash).
+
+
+def test_parenthesized_multiline_from_import(tmp_path: Path) -> None:
+    _make_pkg(tmp_path)
+    write_file(tmp_path / "app.py", "from pkg import (\n    mod,\n    other,\n)\n")
+
+    edges = _graph_for(tmp_path).get("app.py", set())
+    assert {"pkg/mod.py", "pkg/other.py"} <= edges
+
+
+def test_backslash_continued_from_import(tmp_path: Path) -> None:
+    _make_pkg(tmp_path)
+    write_file(tmp_path / "app.py", "from pkg import mod, \\\n    other\n")
+
+    edges = _graph_for(tmp_path).get("app.py", set())
+    assert {"pkg/mod.py", "pkg/other.py"} <= edges
+
+
+def test_multiline_clause_with_per_line_comments(tmp_path: Path) -> None:
+    _make_pkg(tmp_path)
+    write_file(
+        tmp_path / "app.py",
+        "from pkg import (  # noqa\n    mod,  # keep this\n    other,\n)\n",
+    )
+
+    edges = _graph_for(tmp_path).get("app.py", set())
+    assert {"pkg/mod.py", "pkg/other.py"} <= edges
+
+
+def test_continuation_scan_stops_at_closing_paren(tmp_path: Path) -> None:
+    """The scan must not run past the statement into unrelated code."""
+    _make_pkg(tmp_path)
+    write_file(tmp_path / "pkg" / "unrelated.py", "Z = 3\n")
+    write_file(
+        tmp_path / "app.py",
+        "from pkg import (\n    mod,\n)\n\ndef f():\n    unrelated = 1\n    return unrelated\n",
+    )
+
+    edges = _graph_for(tmp_path).get("app.py", set())
+    assert "pkg/mod.py" in edges
+    assert "pkg/unrelated.py" not in edges, "scan ran past the closing paren"
+
+
+def test_multiline_non_module_names_make_no_edge(tmp_path: Path) -> None:
+    _make_pkg(tmp_path)
+    write_file(tmp_path / "app.py", "from pkg import (\n    SOME_CONSTANT,\n)\n")
+
+    assert _graph_for(tmp_path).get("app.py", set()) == {"pkg/__init__.py"}
+
+
+def test_multiline_import_past_truncation_cap(tmp_path: Path) -> None:
+    """The hard case: continuation lines must survive import harvesting too.
+
+    `import_source` is built by filtering the untruncated text to import lines;
+    a naive filter keeps `from pkg import (` and drops the indented names under
+    it, leaving the graph an empty clause.
+    """
+    from repoctx.config import DEFAULT_CONFIG
+
+    _make_pkg(tmp_path)
+    filler = "# " + ("x" * 98) + "\n"
+    padding = filler * ((DEFAULT_CONFIG.max_file_bytes // len(filler)) + 20)
+    write_file(
+        tmp_path / "big.py",
+        "HEADER = 1\n"
+        + padding
+        + "\ndef late():\n    from pkg import (\n        mod,\n        other,\n    )\n    return mod\n",
+    )
+
+    index = scan_repository(tmp_path)
+    assert "from pkg import (" not in index.records["big.py"].content, "must be past cap"
+
+    edges = build_dependency_graph(index).forward.get("big.py", set())
+    assert {"pkg/mod.py", "pkg/other.py"} <= edges

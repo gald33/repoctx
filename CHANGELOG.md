@@ -6,6 +6,26 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Fixed — multi-line `from X import (...)` clauses lost their submodule edges
+
+1.10.0 resolved imported names to submodules but was deliberately line-scoped,
+so a clause continued across lines contributed nothing: `from pkg import (`
+yielded an empty name list. Backslash continuations had the same gap.
+
+`_complete_from_clause` now follows the continuation with an **explicit bounded
+scan** (parenthesis depth / trailing backslash, capped at 50 lines) rather than
+a wider regex — a `\s`-based class spanning lines is what caused the 1.9.0
+crash, so the continuation is tracked in code where it can be reasoned about
+and tested. Comments are stripped per line, and the scan stops at the closing
+paren so it can't run on into unrelated code.
+
+The scanner's import harvesting had to match: `import_source` (used for files
+past the 16 KB truncation cap) was built by filtering to lines starting with
+`import`/`from`, which kept `from pkg import (` and dropped the indented names
+beneath it. It now emits each statement with its continuation lines intact.
+
+On repoctx itself this recovers a further **346 → 358 edges**.
+
 ## [1.10.0] — 2026-07-14
 
 Two dependency-graph blind spots, both found by pointing repoctx at its own

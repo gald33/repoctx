@@ -10,9 +10,8 @@ from repoctx.models import DependencyGraph, RankedPath, RepositoryIndex
 # only group 1 reaches ``pkg/__init__.py`` while missing ``pkg/mod.py`` — the
 # real dependency. Line-scoped ([ \t], `[^\n]*`) on purpose; a `\s`-based class
 # here is what let the sibling import regex swallow whole blocks (see 1.9.0).
-# Known limitation: a parenthesized clause continued onto later lines yields
-# only the first line's names, so those submodule edges are missed (the package
-# edge is still added, i.e. no worse than before).
+# Clauses continued across lines (parenthesized or backslash) are followed by
+# ``_complete_from_clause`` — an explicit bounded scan rather than a wider regex.
 PYTHON_FROM_RE = re.compile(
     r"^[ \t]*from[ \t]+([.\w]+)[ \t]+import[ \t]+([^\n]*)", re.MULTILINE
 )
@@ -135,7 +134,7 @@ def _extract_python_dependencies(
         # ``pkg/__init__.py``. Resolve each imported name as a candidate
         # submodule. A name that isn't a module (``from pkg import CONSTANT``)
         # simply doesn't resolve, so this cannot invent edges.
-        for name in _from_import_names(match.group(2)):
+        for name in _from_import_names(_complete_from_clause(content, match)):
             submodule_path = (
                 package_path + name
                 if package_path.endswith(".")  # ``from . import mod`` -> ``.mod``
@@ -165,14 +164,52 @@ def _extract_python_dependencies(
     return dependencies
 
 
-def _from_import_names(clause: str) -> list[str]:
-    """Names bound by the ``import`` clause of a ``from X import ...`` line.
+# A parenthesized or backslash-continued import clause spans lines. The scan
+# below follows it explicitly and with a hard bound, rather than widening the
+# regex — a `\s`-based class spanning lines is exactly what let the sibling
+# import regex swallow whole blocks and crash every protocol op (see 1.9.0).
+_MAX_CONTINUATION_LINES = 50
 
-    ``a, b as c`` -> ``["a", "b"]`` (the alias is never the module). Comments,
-    parens, ``*``, and backslash continuations are dropped; anything that isn't
-    a bare identifier is ignored, so junk can never reach the resolver.
+
+def _complete_from_clause(content: str, match: re.Match[str]) -> str:
+    """Return the full imported-names clause, following line continuations.
+
+    ``from x import (\\n a,\\n b,\\n)`` and ``from x import a, \\`` both carry
+    names past the matched line. Returns the single-line clause untouched when
+    nothing is open, so the common case costs one paren count.
     """
-    text = clause.split("#", 1)[0].replace("(", " ").replace(")", " ")
+    clause = match.group(2)
+    depth = clause.count("(") - clause.count(")")
+    if depth <= 0 and not clause.rstrip().endswith("\\"):
+        return clause
+
+    parts = [clause]
+    # The match ends *before* the newline, so drop it — otherwise splitlines()
+    # yields a leading "" that looks like an unbroken, unclosed line and ends
+    # a backslash continuation one line early.
+    rest = content[match.end():]
+    if rest.startswith("\n"):
+        rest = rest[1:]
+    for offset, line in enumerate(rest.splitlines()):
+        if offset >= _MAX_CONTINUATION_LINES:
+            break
+        parts.append(line)
+        depth += line.count("(") - line.count(")")
+        if depth <= 0 and not line.rstrip().endswith("\\"):
+            break
+    return "\n".join(parts)
+
+
+def _from_import_names(clause: str) -> list[str]:
+    """Names bound by the ``import`` clause of a ``from X import ...``.
+
+    ``a, b as c`` -> ``["a", "b"]`` (the alias is never the module). Comments
+    are stripped per line (the clause may span lines); parens, backslashes,
+    ``*``, and anything that isn't a bare identifier are dropped, so junk can
+    never reach the resolver.
+    """
+    stripped = " ".join(line.split("#", 1)[0] for line in clause.splitlines())
+    text = stripped.replace("(", " ").replace(")", " ").replace("\\", " ")
     names: list[str] = []
     for item in text.split(","):
         parts = item.strip().split()
