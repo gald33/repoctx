@@ -32,6 +32,7 @@ IGNORED_DIRS = (
     "coverage",
     "dist",
     "node_modules",
+    "site-packages",  # vendored deps without a pyvenv.cfg alongside them
     "venv",
 )
 

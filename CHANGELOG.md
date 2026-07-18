@@ -6,6 +6,65 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.9.0] — 2026-07-14
+
+Four fixes, all found by the dogfood lane on its first day. The reporting bug
+is why the other three went unseen for six weeks.
+
+### Fixed — queued reports never uploaded from the MCP server
+
+`DEFAULT_FLUSH_BATCH_BYTES` was defined and documented as an "opportunistic
+flush threshold" but **never referenced**, so the only automatic upload was the
+`atexit` hook. The MCP server is a long-lived process terminated with SIGTERM
+at session end, and Python does not run `atexit` handlers on SIGTERM — so every
+event it queued sat on disk forever. Observed in the wild: **215 events
+accumulated over six weeks with zero uploads**, silently capped by the 1 MB
+queue limit.
+
+- **`maybe_flush_async()`** now drains from the enqueue path, triggering when
+  the queue reaches `DEFAULT_FLUSH_BATCH_BYTES` (64 KB) **or** when the last
+  flush was more than `DEFAULT_FLUSH_INTERVAL_SECONDS` (5 min) ago — size alone
+  strands light users for weeks. Runs on a daemon thread with a single-in-flight
+  guard, so a burst of ops never spawns a thread each and never blocks a tool
+  call on network I/O. `atexit` is kept as a backstop.
+- **`REPOCTX_REPORTING_AUTOFLUSH=off`** disables it, for anyone who wants
+  uploads only on an explicit `repoctx reporting flush`.
+- **Test isolation.** `DEFAULT_ENDPOINT` is the real production URL, so a
+  maintainer running the suite with `REPOCTX_DOGFOOD=1` exported would have
+  POSTed synthetic events to production. A suite-wide `conftest.py` fixture now
+  hard-disables reporting and autoflush.
+
+### Fixed — one `import` line could take down every protocol op on a repo
+
+`PYTHON_IMPORT_RE` used `[.\w\s,]+`, whose `\s` matches newlines. A single
+`import os` therefore swallowed every following line until a character outside
+the class, capturing whole `from x import a, b,` blocks in one match. Two
+consequences:
+
+- **Crash.** When the captured run ended on a trailing comma, the final split
+  segment was empty and `item.strip().split()[0]` raised `IndexError` — from
+  inside `build_dependency_graph`, which every protocol op calls. One such file
+  anywhere in the repo meant `bundle`, `scope`, `validate_plan`, `risk_report`,
+  `refresh`, and `detect_changes` all failed, 100% of the time.
+- **False edges (silent).** Symbols from the absorbed `from ... import a, b`
+  lines were looked up as module names, so a symbol sharing a name with a real
+  module (`from .utils import config` → `config.py`) created a bogus dependency
+  edge, quietly degrading retrieval on *every* repo — not just crashing ones.
+
+The regex is now line-scoped (`[ \t]` instead of `\s`), and empty segments are
+skipped rather than indexed into. `import x as y` still resolves the module.
+
+### Fixed — virtualenvs with non-standard names were indexed
+
+`IGNORED_DIRS` knows `venv` and `.venv`, so a virtualenv named anything else
+(`myenv`, `env311`, …) had its entire vendored `site-packages` tree pulled into
+the index — third-party code competing with the user's own for retrieval slots,
+and the source of the crashing import above. Detection is now **structural**:
+any directory containing a `pyvenv.cfg` (PEP 405's venv marker, name-independent)
+is pruned during the walk, and `site-packages` is added to `IGNORED_DIRS` for
+vendored trees without a marker. On the repo that surfaced this, the index drops
+from 1537 files to 1017.
+
 ## [1.8.0] — 2026-07-14
 
 ### Added — dogfood failure reporting (opt-in, full error detail)

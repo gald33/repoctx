@@ -65,3 +65,43 @@ def test_scan_repository_ignores_claude_directory(tmp_path: Path) -> None:
     assert ".claude/worktrees/branch-x/src/main.py" not in index.records
     assert ".claude/settings.json" not in index.records
     assert "src/main.py" in index.records
+
+
+def test_scanner_prunes_virtualenv_by_pyvenv_cfg(tmp_path: Path) -> None:
+    """A virtualenv with a non-standard name must still be excluded.
+
+    `IGNORED_DIRS` only knows `venv`/`.venv`, so a virtualenv named anything
+    else (`myenv`, `env311`, …) let its whole vendored site-packages tree into
+    the index — thousands of third-party files, and in the wild a pygments
+    module whose import shape crashed the dependency graph. PEP 405 guarantees
+    a venv root contains `pyvenv.cfg`, so detect it structurally.
+    """
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("import os\n", encoding="utf-8")
+
+    venv = tmp_path / "nested" / "myenv"
+    (venv / "lib" / "python3.13" / "site-packages" / "pygments").mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    (venv / "lib" / "python3.13" / "site-packages" / "pygments" / "cmdline.py").write_text(
+        "import os\nimport sys\n", encoding="utf-8"
+    )
+    # Directly under the venv root, so this file is excluded only by the
+    # pyvenv.cfg pruning — not by the `site-packages` name rule.
+    (venv / "tool.py").write_text("import os\n", encoding="utf-8")
+
+    index = scan_repository(tmp_path)
+    paths = set(index.records)
+    assert "src/app.py" in paths
+    assert not any("myenv" in p for p in paths), f"virtualenv leaked into index: {paths}"
+
+
+def test_scanner_still_indexes_a_plain_dir_named_like_a_venv_without_marker(
+    tmp_path: Path,
+) -> None:
+    """Only prune on the real marker — don't over-prune a legitimate package."""
+    pkg = tmp_path / "myenv"
+    pkg.mkdir()
+    (pkg / "real_code.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    index = scan_repository(tmp_path)
+    assert "myenv/real_code.py" in index.records

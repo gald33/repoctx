@@ -28,3 +28,19 @@ def _no_ambient_autoprovision(monkeypatch: pytest.MonkeyPatch):
     """
     monkeypatch.delenv("CLAUDE_CODE_REMOTE", raising=False)
     monkeypatch.setenv("REPOCTX_AUTO_EMBEDDINGS", "0")
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_reporting(monkeypatch: pytest.MonkeyPatch):
+    """Keep upload reporting inert suite-wide unless a test opts in.
+
+    ``DEFAULT_ENDPOINT`` is the real production ingest URL, and the enqueue
+    path now kicks a background flush. A maintainer running the suite with
+    ``REPOCTX_DOGFOOD=1`` exported (the documented dogfood setup) would
+    otherwise POST synthetic test events straight to production. Hard-off here;
+    ``test_reporting.py`` deletes this var to exercise the real precedence
+    rules, and additionally pins autoflush off so it never opens a socket.
+    """
+    monkeypatch.delenv("REPOCTX_DOGFOOD", raising=False)
+    monkeypatch.setenv("REPOCTX_REPORTING", "off")
+    monkeypatch.setenv("REPOCTX_REPORTING_AUTOFLUSH", "off")
