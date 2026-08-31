@@ -32,9 +32,10 @@ interface EventV1 {
   output_bytes?: number;
   repo_fingerprint?: string;
   stats?: Record<string, unknown>;
-  // Dogfood-only fields. `dogfood: true` is what unlocks acceptance of the
-  // message/traceback below; without it those keys are rejected like any
-  // other forbidden key. Set only by installs running REPOCTX_DOGFOOD=1.
+  // Failure-detail fields. `dogfood: true` (set by installs running
+  // REPOCTX_DOGFOOD=1) unlocks both; the canary channel unlocks
+  // `error_message` alone. Otherwise they're rejected like any other
+  // forbidden key.
   dogfood?: boolean;
   error_message?: string;
   traceback?: string;
@@ -43,6 +44,44 @@ interface EventV1 {
 // Forbidden keys the ingest accepts *only* on an event that declares
 // `dogfood: true`. Kept in lockstep with the client's DOGFOOD_EXEMPT_KEYS.
 const DOGFOOD_EXEMPT_KEYS = new Set(["error_message", "traceback"]);
+
+// Additionally exempt on the canary channel, dogfood or not. Canary installs
+// have opted into a deliberately less-stable lane, and an error *class* alone
+// has proven too thin to act on: an IndexError burst across six ops was
+// recorded with no way to tell what broke, because the failing installs
+// weren't in dogfood mode. The message usually names the failing symbol.
+//
+// `traceback` is deliberately NOT here — frame lines carry absolute local
+// paths, so it stays dogfood-only where the user opted in explicitly.
+const CANARY_EXEMPT_KEYS = new Set(["error_message"]);
+
+// Every op name the client is allowed to report. `op` is a closed vocabulary,
+// not free text, so an allowlist is enforceable — and it has already caught a
+// real leak: two rows reached production D1 with `op` set to a filesystem
+// path ("/tmp/pp-fuzz/probe") from local fuzz testing. The schema forbids
+// paths in this table; only type-checking `op` let one through.
+//
+// Adding a client-side op means adding it here and deploying the Worker,
+// otherwise those events are rejected. That coupling is intentional: dropping
+// telemetry for one release is recoverable, leaking a user's repo path is not.
+const ALLOWED_OPS = new Set([
+  "advisory_search",
+  "authority",
+  "bundle",
+  "detect_changes",
+  "get_task_context",
+  "index",
+  "install",
+  "mark_used",
+  "propose_authority",
+  "refresh",
+  "reporting",
+  "risk_report",
+  "scope",
+  "semantic_search",
+  "stats",
+  "validate_plan",
+]);
 
 // Keys we refuse to accept anywhere in the event. Defense-in-depth — the
 // client is supposed to never send these, but the server enforces the
@@ -189,7 +228,9 @@ type ParseResult =
   | { ok: true; event: EventV1 }
   | { ok: false; reason: string };
 
-function tryParseEvent(line: string): ParseResult {
+// Exported for tests. Cloudflare only ever uses the default export above, so
+// the extra named export costs nothing at runtime.
+export function tryParseEvent(line: string): ParseResult {
   let raw: unknown;
   try {
     raw = JSON.parse(line);
@@ -205,13 +246,19 @@ function tryParseEvent(line: string): ParseResult {
     return { ok: false, reason: "bad_dogfood" };
   }
   const dogfood = event.dogfood === true;
+  const canary = event.channel === "canary";
 
   // Forbidden-key check at the top level. We don't deep-scan stats — the
   // client is responsible for keeping the stats blob clean — but we DO
-  // refuse any forbidden key on the event itself. In dogfood mode the
-  // message/traceback keys are exempted; everything else stays forbidden.
+  // refuse any forbidden key on the event itself. Dogfood exempts
+  // message+traceback; canary exempts the message alone. Everything else
+  // stays forbidden on every channel.
   for (const key of Object.keys(event)) {
-    if (FORBIDDEN_KEYS.has(key) && !(dogfood && DOGFOOD_EXEMPT_KEYS.has(key))) {
+    if (!FORBIDDEN_KEYS.has(key)) continue;
+    const exempt =
+      (dogfood && DOGFOOD_EXEMPT_KEYS.has(key)) ||
+      (canary && CANARY_EXEMPT_KEYS.has(key));
+    if (!exempt) {
       return { ok: false, reason: `forbidden_key:${key}` };
     }
   }
@@ -242,8 +289,15 @@ function tryParseEvent(line: string): ParseResult {
   ) {
     return { ok: false, reason: "bad_session_id" };
   }
-  if (event.op !== undefined && typeof event.op !== "string") {
-    return { ok: false, reason: "bad_op" };
+  if (event.op !== undefined && event.op !== null) {
+    if (typeof event.op !== "string") {
+      return { ok: false, reason: "bad_op" };
+    }
+    // Closed vocabulary — anything else is a client bug, and the value may be
+    // a path or other identifying string we must not persist.
+    if (!ALLOWED_OPS.has(event.op)) {
+      return { ok: false, reason: "unknown_op" };
+    }
   }
   if (event.success !== undefined && typeof event.success !== "boolean") {
     return { ok: false, reason: "bad_success" };

@@ -138,6 +138,16 @@ FORBIDDEN_UPLOAD_KEYS = frozenset({
 # queries or code even here.
 DOGFOOD_EXEMPT_KEYS = frozenset({"error_message", "traceback"})
 
+# Additionally survives redaction on the canary channel, dogfood or not.
+# Canary users opted into a less-stable lane, and an error class alone proved
+# too thin to act on — an IndexError burst across six ops was recorded with no
+# way to tell what broke. The message usually names the failing symbol.
+#
+# `traceback` is deliberately excluded: frame lines carry absolute local
+# paths, so it stays dogfood-only. Mirrored by CANARY_EXEMPT_KEYS in the
+# ingest Worker, which enforces the same split server-side.
+CANARY_EXEMPT_KEYS = frozenset({"error_message"})
+
 # Caps so a pathological exception can't blow past the Worker's per-event
 # size limit. Tracebacks are truncated from the *front* (oldest frames) so
 # the innermost, most-diagnostic frames always survive.
@@ -209,18 +219,34 @@ def is_dogfood() -> bool:
 
 
 def capture_exc_detail(exc: BaseException) -> tuple[str | None, str | None]:
-    """Return ``(message, traceback)`` for ``exc`` — but only in dogfood mode.
+    """Return ``(message, traceback)`` for ``exc``, gated by mode and channel.
 
-    Off dogfood this returns ``(None, None)`` so nothing but the error *class*
-    (recorded separately as ``error_type``) is ever captured — the default
-    lane's contract is unchanged and no traceback is even written to the
-    local log. In dogfood mode both are truncated to the size caps above.
+    Three tiers:
+
+    * **dogfood** — message *and* traceback, both truncated to the caps above.
+    * **canary** — message only. Canary installs opted into a deliberately
+      less-stable lane, and the error *class* alone proved too thin to act on:
+      an ``IndexError`` burst across six ops was recorded with no way to tell
+      what actually broke, because the failing installs weren't in dogfood
+      mode. The message usually names the failing symbol. The traceback stays
+      dogfood-only — frame lines carry absolute local paths.
+    * **stable** — ``(None, None)``. Nothing but the error class (recorded
+      separately as ``error_type``) is captured; that lane's contract is
+      unchanged and no traceback is even written to the local log.
+
+    Kept in lockstep with the ingest Worker's DOGFOOD_EXEMPT_KEYS /
+    CANARY_EXEMPT_KEYS, which enforce the same tiers server-side.
     """
-    if not is_dogfood():
+    dogfood = is_dogfood()
+    if not dogfood and CHANNEL != "canary":
         return None, None
-    import traceback as _traceback
 
     message = (str(exc) or type(exc).__name__)[:DOGFOOD_MAX_MESSAGE_CHARS] or None
+    if not dogfood:
+        return message, None
+
+    import traceback as _traceback
+
     formatted = "".join(
         _traceback.format_exception(type(exc), exc, exc.__traceback__)
     ).strip()
@@ -536,10 +562,16 @@ def build_upload_payload(
     Strips forbidden keys, attaches channel/build_id/install_id, replaces
     any local repo_hash with repo_fingerprint. In dogfood mode the exception
     message/traceback keys survive the strip and the payload is tagged
-    ``dogfood: True`` so the ingest Worker knows to accept them.
+    ``dogfood: True`` so the ingest Worker knows to accept them; on canary the
+    message alone survives (see CANARY_EXEMPT_KEYS).
     """
     dogfood = is_dogfood()
-    forbidden = FORBIDDEN_UPLOAD_KEYS - DOGFOOD_EXEMPT_KEYS if dogfood else FORBIDDEN_UPLOAD_KEYS
+    exempt: frozenset[str] = frozenset()
+    if dogfood:
+        exempt |= DOGFOOD_EXEMPT_KEYS
+    if CHANNEL == "canary":
+        exempt |= CANARY_EXEMPT_KEYS
+    forbidden = FORBIDDEN_UPLOAD_KEYS - exempt
 
     out: dict[str, Any] = {}
     for key, value in local_event.items():
