@@ -207,7 +207,15 @@ class EmbeddingConfig:
     base_refresh_on_read: bool = True
     # Skip the on-read re-embed (warn instead) when more than this many files
     # changed — a large delta means `repoctx index` is the better call.
-    base_refresh_max_files: int = 200
+    #
+    # Sized from measurement, not intuition: a 594-file delta re-embeds in ~20s
+    # at ~515 MB peak RSS. The old 200 was far below that cost curve, and
+    # because drift only ever grows, crossing it meant the index could never
+    # catch up on its own — a repo 1145 files behind stayed there for two
+    # months, silently serving stale retrieval. The cap is TTL-gated
+    # (base_fetch_ttl_seconds), so worst case is one ~30s re-embed per 30 min,
+    # which is strictly better than permanent staleness.
+    base_refresh_max_files: int = 2000
     # Overlay the current worktree's delta (commits ahead of origin/main +
     # uncommitted edits) on top of the origin/main base at query time, so
     # in-progress work is retrievable as if already rebased. Off → retrieval
