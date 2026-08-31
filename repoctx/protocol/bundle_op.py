@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from repoctx.bundle import build_bundle
+from repoctx.protocol.base_status import attach_base_status, refresh_base
 
 logger = logging.getLogger(__name__)
 
@@ -73,30 +74,11 @@ def _flush_pending_embeddings(repo_root: str | Path) -> None:
     maybe_flush_on_read(repo_root=repo_root)
 
 
-def _maybe_refresh_base(repo_root: str | Path) -> dict | None:
-    try:
-        from repoctx.embeddings import maybe_refresh_base_on_read
-    except ImportError:
-        return None
-    try:
-        return maybe_refresh_base_on_read(repo_root)
-    except Exception:
-        logger.debug("base refresh failed", exc_info=True)
-        return None
-
-
-def _attach_base_status(payload: dict[str, Any], base_status: dict | None) -> None:
-    if not base_status:
-        return
-    try:
-        from repoctx.embeddings import base_staleness_warning
-
-        payload.setdefault("retrieval", {})["base"] = base_status
-        warning = base_staleness_warning(base_status)
-        if warning:
-            payload.setdefault("warnings", []).append(warning)
-    except Exception:
-        logger.debug("attach base status failed", exc_info=True)
+# Thin aliases: the implementations moved to repoctx.protocol.base_status so
+# scope / risk_report / validate_plan surface the same staleness signal bundle
+# always has. Kept under the old private names for in-module call sites.
+_maybe_refresh_base = refresh_base
+_attach_base_status = attach_base_status
 
 
 def _embedding_scores_for(

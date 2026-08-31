@@ -39,6 +39,7 @@ def run(args: argparse.Namespace) -> None:
     debug = getattr(args, "debug_scores", False)
     repo = Path(args.repo)
 
+    _warn_if_base_stale(repo, args)
     embedding_scores = _load_embedding_scores(args.task, repo, args)
 
     try:
@@ -72,6 +73,31 @@ def run(args: argparse.Namespace) -> None:
         print(json.dumps(response.to_dict(include_debug=debug), indent=2))
         return
     print(response.context_markdown)
+
+
+def _warn_if_base_stale(repo_root: Path, args: argparse.Namespace) -> None:
+    """Refresh the origin/main base and warn on stderr when it's still behind.
+
+    The CLI is the surface the user reads directly, and it used to print
+    confident results off an index frozen months earlier with no hint anything
+    was wrong. Written to stderr so it stays visible without corrupting either
+    the markdown output or `--format json`.
+    """
+    if getattr(args, "no_embeddings", False):
+        return
+    from repoctx.protocol.base_status import refresh_base
+
+    status = refresh_base(repo_root)
+    if not status:
+        return
+    try:
+        from repoctx.embeddings import base_staleness_warning
+
+        warning = base_staleness_warning(status)
+    except Exception:
+        return
+    if warning:
+        print(f"warning: {warning}", file=sys.stderr)
 
 
 def _load_embedding_scores(

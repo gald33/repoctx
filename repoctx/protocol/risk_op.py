@@ -8,6 +8,7 @@ from typing import Any
 
 from repoctx.bundle import build_bundle
 from repoctx.bundle.schema import RiskNote
+from repoctx.protocol.base_status import attach_base_status, refresh_base
 
 
 def op_risk_report(
@@ -15,6 +16,7 @@ def op_risk_report(
     changed_files: list[str],
     repo_root: str | Path = ".",
 ) -> dict[str, Any]:
+    base_status = refresh_base(repo_root)
     bundle = build_bundle(task, repo_root=repo_root)
     risks: list[RiskNote] = []
 
@@ -89,12 +91,14 @@ def op_risk_report(
                 )
             )
 
-    return {
+    payload = {
         "schema_version": "repoctx-bundle/1",
         "task": {"summary": bundle.task_summary, "raw": bundle.task_raw},
         "changed_files": list(changed_files),
         "risk_notes": [r.to_dict() for r in risks],
     }
+    attach_base_status(payload, base_status)
+    return payload
 
 
 def _path_matches(path: str, protected: str) -> bool:

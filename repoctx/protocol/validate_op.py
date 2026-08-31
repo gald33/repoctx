@@ -8,6 +8,7 @@ from typing import Any
 
 from repoctx.bundle import build_bundle
 from repoctx.bundle.schema import ValidationPlan
+from repoctx.protocol.base_status import attach_base_status, refresh_base
 
 
 def op_validate_plan(
@@ -15,6 +16,7 @@ def op_validate_plan(
     changed_files: list[str],
     repo_root: str | Path = ".",
 ) -> dict[str, Any]:
+    base_status = refresh_base(repo_root)
     bundle = build_bundle(task, repo_root=repo_root)
     base = bundle.validation_plan
 
@@ -32,12 +34,14 @@ def op_validate_plan(
         contract_checks=sorted(set(base.contract_checks) | {c.source_record_id for c in matched_constraints if c.source_record_id.startswith("contract:")}),
         invariants_to_verify=sorted(set(base.invariants_to_verify) | {c.id for c in matched_constraints if c.severity == "hard"}),
     )
-    return {
+    payload = {
         "schema_version": "repoctx-bundle/1",
         "task": {"summary": bundle.task_summary, "raw": bundle.task_raw},
         "validation_plan": plan.to_dict(),
         "changed_files": list(changed_files),
     }
+    attach_base_status(payload, base_status)
+    return payload
 
 
 def _constraints_matching_paths(constraints, changed_files: list[str]):
