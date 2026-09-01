@@ -6,6 +6,59 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.13.0] — 2026-09-01
+
+### Fixed — a stale index could never catch up, and never said so
+
+Four bugs, one shape: retrieval degrading without telling anyone. A maintainer
+repo had been serving results from a two-month-old snapshot — 1145 files behind
+`origin/main` — while every response still looked confident and well-formed.
+
+**The refresh cap was a ratchet, not a safety valve.** The on-read `origin/main`
+refresh skipped re-embedding past `base_refresh_max_files` (200) and only warned.
+Because drift only ever grows, crossing that threshold once meant the index could
+never recover on its own. 200 was also far below the real cost: a 594-file delta
+re-embeds in ~20s at ~515 MB peak RSS. Raised to 2000; the refresh is TTL-gated,
+so the worst case is one ~30s re-embed per 30 minutes — strictly better than
+staying stale forever.
+
+**Only two surfaces reported staleness.** `bundle` and `semantic_search` warned;
+`scope`, `risk_report`, `validate_plan` and the CLI query path did not, which is
+how the frozen index went unnoticed. The refresh/attach pair `bundle` already had
+moved to `protocol/base_status`, and every read-path op now reports
+`retrieval.base` and appends a line to `warnings`. The CLI writes to stderr so
+markdown and `--format json` output stay clean. New read ops should wire through
+that module rather than reimplementing it.
+
+`refresh_base` also now ignores a non-directory `repo_root`: the refresh writes a
+fetch-TTL stamp under `<repo>/.repoctx/state`, so probing a bad path used to
+create it and mask the caller's "no such repo" error.
+
+### Fixed — `install` no longer clobbers a hand-authored `.mcp.json`
+
+The installers rewrote the repoctx MCP entry whenever it wasn't byte-identical to
+what they emit today — unable to distinguish a stale repoctx-generated entry
+(worth upgrading) from one a repo wrote deliberately. A repo pointing the server
+at its own launcher script, to force offline mode or unpack a prebuilt index
+first, would have that wrapper silently replaced, breaking exactly the cloud
+sessions it existed to support. One downstream repo had to defend itself with a
+"Do NOT run `repoctx install` here" note in `.gitignore`.
+
+`is_repoctx_authored_server` now gates the write: only entries invoking the
+module or package directly are ours to rewrite; anything delegating to a script
+on disk is left alone with a warning. Applied to all three adapters — the bug was
+copied across `claude_code`, `cursor` and `codex`. Legacy pinned-interpreter
+entries still upgrade, and fresh installs are unaffected.
+
+### Changed — canary uploads the exception message
+
+The default lane records only an error *class*, which proved too thin: an
+`IndexError` burst across six ops was recorded with nothing to debug from,
+because the failing installs weren't in dogfood mode. Canary installs have
+already opted into a less-stable lane, so `capture_exc_detail` now returns the
+message there. `traceback` stays dogfood-only — frame lines embed absolute local
+paths. Every other redacted field is still stripped on every channel.
+
 ## [1.12.0] — 2026-07-18
 
 ### Changed — Python imports are parsed with `ast`, not regex
