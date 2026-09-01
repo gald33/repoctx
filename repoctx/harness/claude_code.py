@@ -29,11 +29,14 @@ harness beyond what the repo can influence.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shlex
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 AGENTS_SECTION_HEADER = "## Ground truth (repoctx)"
 
@@ -187,6 +190,38 @@ def portable_mcp_server_config() -> dict[str, object]:
         f"exit 1"
     )
     return {"command": "sh", "args": ["-c", script]}
+
+
+def is_repoctx_authored_server(entry: object) -> bool:
+    """True if *entry* looks like an MCP entry repoctx itself wrote.
+
+    Re-install upgrades stale repoctx-generated entries in place (the pre-1.7
+    form pinned an absolute interpreter that could never spawn elsewhere). But
+    "not byte-identical to what I emit today" is not the same as "mine to
+    overwrite": a repo may deliberately point the repoctx server at its own
+    launcher, e.g.
+
+        {"command": "bash", "args": ["${CLAUDE_PROJECT_DIR:-.}/scripts/repoctx_mcp_launch.sh"]}
+
+    to force HF offline mode or unpack a prebuilt index first. Clobbering that
+    with our own command silently breaks every cloud session and teammate
+    checkout that depended on the wrapper — the failure the wrapper existed to
+    prevent. One downstream repo had to defend itself with a "Do NOT run
+    `repoctx install` here" note in .gitignore; that note should not have been
+    necessary.
+
+    So: only entries that invoke the module/package *directly* are ours to
+    rewrite. Anything delegating to a script on disk is hand-authored and is
+    left alone.
+    """
+    if not isinstance(entry, dict):
+        return False
+    blob = json.dumps(entry)
+    # Delegates to a repo-owned launcher — never something we generated.
+    if ".sh" in blob or ".bat" in blob or ".cmd" in blob:
+        return False
+    return "repoctx.mcp_server" in blob or "repoctx-mcp" in blob
+
 
 CLAUDE_MD_FILENAME = "CLAUDE.md"
 AGENTS_MD_FILENAME = "AGENTS.md"
@@ -559,6 +594,16 @@ def _ensure_mcp_registration(root: Path) -> tuple[Path, bool]:
     existing = servers.get(MCP_SERVER_NAME)
     if existing == desired:
         return path, False
+    if existing is not None and not is_repoctx_authored_server(existing):
+        # Hand-authored entry (e.g. a repo's own launcher script). Leave it:
+        # overwriting would break whatever the wrapper was there to do.
+        logger.warning(
+            "Leaving the existing %s entry in %s alone — it doesn't look like "
+            "one repoctx wrote, so it's presumed hand-authored. Delete it "
+            "first if you want repoctx to manage it.",
+            MCP_SERVER_NAME, path,
+        )
+        return path, False
     # Upgrade in place: older installs pinned the installer's absolute
     # interpreter (and ``--repo <abs path>``), which can never spawn on any
     # other machine — committed to git, that config broke every cloud
@@ -717,6 +762,7 @@ __all__ = [
     "POINTER_TEMPLATE",
     "ensure_claude_md_nudge",
     "install_claude_code",
+    "is_repoctx_authored_server",
     "portable_mcp_server_config",
     "render_agents_section",
 ]

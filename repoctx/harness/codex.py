@@ -11,14 +11,18 @@ evolves; the AGENTS.md section is what actually guides the agent.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 from repoctx.harness.claude_code import (
     InstallResult,
     MCP_SERVER_NAME,
     _ensure_agents_section,
+    is_repoctx_authored_server,
     portable_mcp_server_config,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def install_codex(repo_root: str | Path = ".") -> InstallResult:
@@ -47,7 +51,17 @@ def _ensure_codex_mcp(root: Path) -> tuple[Path, bool]:
     # Committed and shared across machines — must be portable and
     # self-bootstrapping (see portable_mcp_server_config).
     desired = portable_mcp_server_config()
-    if servers.get(MCP_SERVER_NAME) == desired:
+    existing = servers.get(MCP_SERVER_NAME)
+    if existing == desired:
+        return path, False
+    if existing is not None and not is_repoctx_authored_server(existing):
+        # Hand-authored entry (e.g. a repo's own launcher script) — not ours
+        # to overwrite. See is_repoctx_authored_server.
+        logger.warning(
+            "Leaving the existing %s entry in %s alone — it doesn't look like "
+            "one repoctx wrote, so it's presumed hand-authored.",
+            MCP_SERVER_NAME, path,
+        )
         return path, False
     servers[MCP_SERVER_NAME] = desired
     codex_dir.mkdir(parents=True, exist_ok=True)

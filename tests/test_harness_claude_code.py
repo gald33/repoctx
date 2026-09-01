@@ -22,6 +22,7 @@ from repoctx.harness.claude_code import (
     NUDGE_MARKER,
     POINTER_MARKER,
     _classify_md,
+    is_repoctx_authored_server,
 )
 
 # Backward-compat aliases used by older imports/tests.
@@ -170,6 +171,55 @@ def test_mcp_config_upgrades_legacy_pinned_entry(tmp_path: Path) -> None:
     assert entry["command"] == "sh"
     second = install_claude_code(tmp_path)
     assert not second.mcp_config_changed
+
+
+def test_mcp_config_preserves_hand_authored_launcher(tmp_path: Path) -> None:
+    """A repo pointing repoctx at its own launcher script must survive install.
+
+    Verbatim from a downstream repo: the wrapper forces HF offline mode and
+    unpacks a prebuilt index before exec'ing the server. Overwriting it with
+    our own command breaks every cloud session that depended on it — that repo
+    had to add a "Do NOT run `repoctx install` here" note to .gitignore.
+    """
+    custom = {
+        "command": "bash",
+        "args": ["${CLAUDE_PROJECT_DIR:-.}/scripts/repoctx_mcp_launch.sh"],
+    }
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"repoctx": custom}})
+    )
+
+    result = install_claude_code(tmp_path)
+
+    assert not result.mcp_config_changed
+    entry = json.loads((tmp_path / ".mcp.json").read_text())["mcpServers"]["repoctx"]
+    assert entry == custom, "hand-authored launcher was overwritten"
+
+
+def test_mcp_config_still_written_when_absent(tmp_path: Path) -> None:
+    """Guarding hand-authored entries must not block a fresh install."""
+    result = install_claude_code(tmp_path)
+    assert result.mcp_config_changed
+    entry = json.loads((tmp_path / ".mcp.json").read_text())["mcpServers"]["repoctx"]
+    assert "repoctx.mcp_server" in json.dumps(entry)
+
+
+@pytest.mark.parametrize(
+    "entry,authored",
+    [
+        ({"command": "sh", "args": ["-c", "exec python3 -m repoctx.mcp_server"]}, True),
+        ({"command": "/usr/bin/python3", "args": ["-m", "repoctx.mcp_server"]}, True),
+        ({"command": "uvx", "args": ["repoctx-mcp"]}, True),
+        # Delegates to a script on disk — hand-authored, hands off.
+        ({"command": "bash", "args": ["scripts/repoctx_mcp_launch.sh"]}, False),
+        # Named to look like ours but still a script: the .sh check wins.
+        ({"command": "sh", "args": ["./repoctx-mcp-wrapper.sh"]}, False),
+        ({"command": "my-own-server", "args": []}, False),
+        ("not-a-dict", False),
+    ],
+)
+def test_is_repoctx_authored_server(entry: object, authored: bool) -> None:
+    assert is_repoctx_authored_server(entry) is authored
 
 
 def test_mcp_config_windows_keeps_pinned_form(
