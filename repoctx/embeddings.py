@@ -1223,7 +1223,20 @@ def enqueue_for_update(
     files re-embedded as part of an automatic flush triggered by this call (0
     if the threshold wasn't reached).
     """
-    rel = PurePosixPath(file_path).as_posix()
+    root = Path(repo_root).resolve()
+    given = Path(file_path)
+    candidate = (given if given.is_absolute() else root / given).resolve()
+    if not candidate.is_relative_to(root):
+        # Claude Code's PostToolUse hook fires for every file the agent writes,
+        # including its own memory files under ~/.claude and editor assets under
+        # ~/.cursor. Those are not part of this repo and can never be embedded
+        # into its index. Before this check they were queued anyway and then
+        # re-queued on every flush forever — one repo accumulated 25 of them
+        # over 102 days, and because the oldest entry kept the age trigger
+        # permanently satisfied, every edit and every read paid for 25 doomed
+        # embed attempts before doing its real work.
+        return {"queued": None, "flushed": 0, "skipped": "outside repository"}
+    rel = candidate.relative_to(root).as_posix()
     pending = _pending_path(repo_root, config)
     pending.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1307,9 +1320,19 @@ def flush_pending(
         flushing.unlink(missing_ok=True)
         return 0
 
+    root = Path(repo_root).resolve()
     survivors: list[dict] = []
     embedded = 0
     for entry in entries:
+        # Queues written before enqueue started refusing out-of-tree paths can
+        # still hold them. They fail with "not in the subpath" every time, and
+        # the generic re-queue below would keep them forever — so drop them
+        # here, the way a vanished file is dropped, rather than treat a
+        # permanent failure as a transient one.
+        given = Path(entry["path"])
+        if not (given if given.is_absolute() else root / given).resolve().is_relative_to(root):
+            logger.info("Dropping queued path outside the repository: %s", entry["path"])
+            continue
         try:
             update_file_in_index(entry["path"], repo_root=repo_root, config=config)
             embedded += 1
