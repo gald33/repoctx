@@ -124,6 +124,57 @@ def test_missing_file_is_dropped(tmp_path: Path, fast_config, monkeypatch):
     assert status["count"] == 0
 
 
+def test_out_of_tree_path_is_refused_at_enqueue(tmp_path: Path, fast_config, patched_update):
+    """The PostToolUse hook reports every file the agent writes, including its
+    own memory files under ~/.claude. Those are not this repo's; refuse them
+    rather than queue a path that can never be embedded."""
+    outside = tmp_path.parent / "elsewhere" / "MEMORY.md"
+    result = emb.enqueue_for_update(str(outside), repo_root=tmp_path, config=fast_config)
+    assert result["queued"] is None
+    assert result["flushed"] == 0
+    status = emb.pending_status(repo_root=tmp_path, config=fast_config)
+    assert status["count"] == 0
+    assert patched_update == []
+
+
+def test_absolute_in_tree_path_is_stored_relative(tmp_path: Path, fast_config, patched_update):
+    """An absolute path inside the repo is fine, but it is stored repo-relative
+    so it dedupes against the same file queued relatively."""
+    emb.enqueue_for_update(str(tmp_path / "src" / "foo.py"), repo_root=tmp_path, config=fast_config)
+    emb.enqueue_for_update("src/foo.py", repo_root=tmp_path, config=fast_config)
+    status = emb.pending_status(repo_root=tmp_path, config=fast_config)
+    assert status["count"] == 1
+    assert status["paths"] == ["src/foo.py"]
+
+
+def test_poisoned_out_of_tree_entry_is_dropped_on_flush(tmp_path: Path, fast_config, monkeypatch):
+    """A queue written before enqueue refused out-of-tree paths can still hold
+    one. It fails with "not in the subpath" every time; before this it was
+    re-queued on every flush forever (25 entries, 102 days, in one repo).
+    Drop it like a vanished file — and never even attempt the embed."""
+    attempts: list[str] = []
+
+    def recording_update(file_path, repo_root, config=DEFAULT_EMBEDDING_CONFIG):
+        attempts.append(str(file_path))
+
+    monkeypatch.setattr(emb, "update_file_in_index", recording_update)
+    emb_dir = tmp_path / fast_config.index_dir / "embeddings"
+    emb_dir.mkdir(parents=True)
+    poison = str(tmp_path.parent / "elsewhere" / "memory" / "notes.md")
+    queue = emb_dir / fast_config.queue_filename
+    queue.write_text(
+        json.dumps({"path": poison, "queued_at": time.time() - 10_000_000}) + "\n"
+        + json.dumps({"path": "src/good.py", "queued_at": time.time()}) + "\n"
+    )
+
+    n = emb.flush_pending(repo_root=tmp_path, config=fast_config)
+
+    assert n == 1
+    assert attempts == ["src/good.py"]
+    status = emb.pending_status(repo_root=tmp_path, config=fast_config)
+    assert status["count"] == 0
+
+
 def test_crash_recovery_picks_up_flushing_file(tmp_path: Path, fast_config, patched_update):
     """A leftover ``.pending.flushing`` from a crashed run is replayed on next enqueue."""
     emb_dir = tmp_path / fast_config.index_dir / "embeddings"

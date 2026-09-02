@@ -39,6 +39,7 @@ def run(args: argparse.Namespace) -> None:
     debug = getattr(args, "debug_scores", False)
     repo = Path(args.repo)
 
+    _flush_pending_on_read(repo, args)
     _warn_if_base_stale(repo, args)
     embedding_scores = _load_embedding_scores(args.task, repo, args)
 
@@ -73,6 +74,22 @@ def run(args: argparse.Namespace) -> None:
         print(json.dumps(response.to_dict(include_debug=debug), indent=2))
         return
     print(response.context_markdown)
+
+
+def _flush_pending_on_read(repo_root: Path, args: argparse.Namespace) -> None:
+    """Drain the debounced update queue before reading, as bundle and scope do.
+
+    The CLI query path never flushed: edits the PostToolUse hook had queued sat
+    there until the next MCP read, so `repoctx TASK` could rank against vectors
+    the agent had already invalidated. Best-effort — the flush never raises.
+    """
+    if getattr(args, "no_embeddings", False):
+        return
+    try:
+        from repoctx.embeddings import maybe_flush_on_read
+    except ImportError:
+        return
+    maybe_flush_on_read(repo_root=repo_root)
 
 
 def _warn_if_base_stale(repo_root: Path, args: argparse.Namespace) -> None:

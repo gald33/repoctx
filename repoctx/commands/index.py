@@ -305,6 +305,11 @@ def _run_update(args: argparse.Namespace) -> None:
         if not target:
             return
         result = enqueue_for_update(target, repo_root=repo)
+        if result.get("queued") is None:
+            # The agent wrote something that isn't part of this repo — its own
+            # memory files, an editor asset. Nothing to index, and nothing worth
+            # a line of hook output on every such write.
+            return
         if result.get("flushed"):
             print(f"Queued {result['queued']} (auto-flushed {result['flushed']} files)")
         else:
@@ -321,6 +326,9 @@ def _run_update(args: argparse.Namespace) -> None:
             print(f"Updated embedding for {args.file}")
         else:
             result = enqueue_for_update(args.file, repo_root=repo)
+            if result.get("queued") is None:
+                print(f"{args.file}: outside the repository, not queued", file=sys.stderr)
+                raise SystemExit(1)
             if result.get("flushed"):
                 print(f"Queued {result['queued']} (auto-flushed {result['flushed']} files)")
             else:
