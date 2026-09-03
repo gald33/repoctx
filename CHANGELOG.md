@@ -6,6 +6,37 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.14.0] — 2026-09-03
+
+### Fixed — the update queue could poison itself and never recover
+
+The PostToolUse hook reports every file Claude Code writes, including its own
+memory files under `~/.claude` and editor assets under `~/.cursor`. Those are
+not part of the repo and can never be embedded into its index, but `enqueue`
+stored them verbatim and `flush` treated the resulting "not in the subpath"
+error as transient and re-queued them. One repo had accumulated 25 such entries
+over 102 days. Because the oldest entry kept the age trigger permanently
+satisfied, every edit and every `bundle`/`scope` read retried all 25 doomed
+embeds and logged 25 warnings before doing its real work — silently, which is
+how this class of bug always presents.
+
+- `enqueue_for_update` refuses a path that resolves outside the repo root, and
+  stores an in-tree absolute path repo-relative so it dedupes with the same
+  file queued relatively.
+- `flush_pending` drops an already-queued out-of-tree entry the way it drops a
+  vanished file, instead of re-queuing a permanent failure forever. This
+  self-heals queues written before the check; verified on the two poisoned
+  repos (25 → 0 and 1 → 0, nothing embedded).
+- The hook handler stays silent on such a write. The explicit `repoctx update
+  <path>` route reports it on stderr and exits 1.
+- The CLI query path now drains the queue on read, as `bundle` and `scope`
+  already did. Before, edits the hook had queued sat until the next MCP read,
+  so `repoctx TASK` could rank against vectors the agent had already
+  invalidated.
+
+A transient failure is still retried; only a path that can never succeed is
+dropped.
+
 ## [1.13.0] — 2026-09-01
 
 ### Fixed — a stale index could never catch up, and never said so
