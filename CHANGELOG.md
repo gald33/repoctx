@@ -6,6 +6,43 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.15.0] — 2026-09-07
+
+### Fixed — the Stop backstop counted zero edits and never fired
+
+The `Stop` hook exists to catch a turn that edited files without calling
+`validate_plan`. It found the turn boundary by scanning for the last
+user-role message — but every tool result is recorded with `role: "user"`, so
+that boundary was almost always the most recent tool result rather than
+anything the user typed. The "current turn" collapsed to the few lines after
+the final tool call, and the condition `edits > 0 and validates == 0` could
+essentially never be true.
+
+Measured on the session that exposed it: 2792 transcript lines, 63 real user
+messages against 608 tool-result echoes, 57 `Edit`/`Write` calls — and the
+hook counted **0** edits and stayed silent. It was silent for exactly the long
+agentic stretches it exists to catch, and looked healthy throughout, because a
+hook that never fires emits no telemetry.
+
+`count_turn_tool_uses` now skips echoes when locating the boundary, keyed on
+either the harness's `toolUseResult` stamp or a `tool_result` content block.
+Either marker alone is sufficient, so a change to one shape cannot quietly
+resurrect the silence. On that same transcript the hook now counts 4 edits and
+fires.
+
+If you have wondered why the exit reminder never appeared, this is why. Expect
+to start seeing it.
+
+### Fixed — `.mcp.json` shipped a machine-specific interpreter
+
+1.13.0's switchboard wiring commit swept in a local override that pinned the
+repoctx server to one laptop's `.venv` path, replacing the portable,
+self-bootstrapping entry. Every clone and cloud session since was told to run
+an interpreter that existed on exactly one machine. The portable form is
+restored, and `enabledMcpjsonServers` is now committed so a clone loads the
+server without a first-use approval prompt — which otherwise leaves a
+non-interactive session nudged toward tools that never loaded.
+
 ## [1.14.0] — 2026-09-03
 
 ### Fixed — the update queue could poison itself and never recover
