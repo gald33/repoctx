@@ -6,6 +6,43 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.16.0] — 2026-09-07
+
+### Added — measure whether validation ran, and whether it caught anything
+
+Everything repoctx recorded about `validate_plan` was invocation. The
+`protocol_op` event says the op ran, how long it took, and whether repoctx
+itself raised — across 322 recorded `validate_plan`/`risk_report` events, all
+14 failures were repoctx crashing (`IndexError`, `FileNotFoundError`). Not one
+was a test failing, because no event had ever carried a test result.
+
+That left the feedback loop closed for retrieval and open for validation.
+Retrieval is graded per path by `mark_used` and fed to the tuner; validation
+was only counted. A `validate_plan` returning a confident list of irrelevant
+tests was indistinguishable from one that caught a real regression, and a plan
+that was never run at all looked identical to one that passed.
+
+New `record_validation` op — a sibling of `mark_used`, not a seventh protocol
+op — takes `{command, exit_code}` for each command the agent ran and appends a
+`validation_run` feedback event joined to the bundle by `bundle_id`. `passed`
+is derived from the exit code rather than trusted from the caller, so a report
+cannot claim a pass it did not get.
+
+`repoctx eval` gains a `validation` block answering two previously
+unanswerable questions:
+
+- **coverage** — of bundles that shipped a plan, how many had it run?
+- **catch rate** — of validation runs, how many failed?
+
+A failing run is the useful one: validation catching something before the
+agent declared done. The tool description and the bundle's finalize checklist
+both say so, because the obvious failure mode is an agent quietly declining to
+report a red result.
+
+Both numbers start at zero and only become meaningful as agents call the new
+op — which is the honest starting point, since how often validation actually
+runs has never been measured.
+
 ## [1.15.0] — 2026-09-07
 
 ### Fixed — the Stop backstop counted zero edits and never fired
