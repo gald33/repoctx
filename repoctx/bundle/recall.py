@@ -40,6 +40,10 @@ def before_finalize_checklist(
     checklist = [
         "Call repoctx.validate_plan(task, changed_files) and run every command it returns.",
         "Call repoctx.risk_report(task, changed_files) and resolve every 'hard'-severity item.",
+        "Call repoctx.record_validation(bundle_id, runs) with the exit code of "
+        "each command you ran — a failure is the valuable case, not a reason to "
+        "skip the report. Without it, repoctx knows validate_plan was called but "
+        "not whether validation ran or caught anything.",
     ]
     if edit_scope.protected_paths:
         checklist.append("Verify no path in edit_scope.protected_paths was changed unintentionally.")

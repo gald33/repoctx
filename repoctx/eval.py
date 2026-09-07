@@ -70,11 +70,56 @@ class KindStats:
 
 
 @dataclass(slots=True)
+class ValidationStats:
+    """Did the validation plan run, and did it catch anything?
+
+    The retrieval metrics above grade which paths earned their slot. These
+    grade the other half of the bundle, which was previously only counted:
+    `protocol_op` recorded that ``validate_plan`` was *called*, never whether
+    the commands it returned were run or what they returned.
+
+    ``catch_rate`` is the one that answers "is this useful" — a failing run is
+    validation catching something before the agent declared done. ``coverage``
+    is the prior question: a plan that is never run cannot catch anything, and
+    that case used to be invisible.
+    """
+
+    runs: int = 0
+    passed: int = 0
+    failed: int = 0
+    #: Bundles that emitted a plan and had at least one run reported.
+    bundles_with_runs: int = 0
+    #: Bundles seen at all, for coverage's denominator.
+    bundles: int = 0
+
+    def catch_rate(self) -> float:
+        if self.runs == 0:
+            return 0.0
+        return self.failed / self.runs
+
+    def coverage(self) -> float:
+        if self.bundles == 0:
+            return 0.0
+        return self.bundles_with_runs / self.bundles
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "runs": self.runs,
+            "passed": self.passed,
+            "failed": self.failed,
+            "bundles_with_runs": self.bundles_with_runs,
+            "catch_rate": round(self.catch_rate(), 4),
+            "coverage": round(self.coverage(), 4),
+        }
+
+
+@dataclass(slots=True)
 class EvalReport:
     bundles: int = 0
     events_total: int = 0
     by_kind: dict[str, KindStats] = field(default_factory=dict)
     overall: KindStats = field(default_factory=KindStats)
+    validation: ValidationStats = field(default_factory=ValidationStats)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -82,6 +127,7 @@ class EvalReport:
             "events_total": self.events_total,
             "by_kind": {k: v.to_dict() for k, v in sorted(self.by_kind.items())},
             "overall": self.overall.to_dict(),
+            "validation": self.validation.to_dict(),
         }
 
 
@@ -103,6 +149,7 @@ def compute_eval(
     # mix of hook+self_report+git on the same path counts once.
     positives_seen: set[tuple[str, str]] = set()
     noise_seen: set[tuple[str, str]] = set()
+    bundles_with_runs: set[str] = set()
 
     for evt in read_events(repo_root, since_iso=since_iso):
         report.events_total += 1
@@ -170,7 +217,21 @@ def compute_eval(
             paths_in_bundle = bundle_path_kinds.get(bid, {})
             if path in paths_in_bundle:
                 _credit_positive(report, paths_in_bundle[path], bid, path, positives_seen)
+        elif et == "validation_run":
+            # Counted even when the bundle_id matches no bundle we saw: a run
+            # reported against a bundle outside the window is still a run, and
+            # dropping it would understate the metric that measures whether
+            # validation happens at all.
+            report.validation.runs += 1
+            if evt.get("passed") is True:
+                report.validation.passed += 1
+            else:
+                report.validation.failed += 1
+            if isinstance(bid, str) and bid:
+                bundles_with_runs.add(bid)
 
+    report.validation.bundles = report.bundles
+    report.validation.bundles_with_runs = len(bundles_with_runs & set(bundle_path_kinds))
     return report
 
 

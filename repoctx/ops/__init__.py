@@ -6,6 +6,7 @@ want to do their own retrieval rather than receive a task-shaped bundle.
 """
 
 from repoctx.ops.mark_used import op_mark_used
+from repoctx.ops.record_validation import op_record_validation
 from repoctx.ops.semantic_search import op_semantic_search
 
-__all__ = ["op_mark_used", "op_semantic_search"]
+__all__ = ["op_mark_used", "op_record_validation", "op_semantic_search"]

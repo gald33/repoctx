@@ -987,6 +987,33 @@ def create_server(repo_root: str | Path | None = None, telemetry_dir: str | Path
         mark_used,
     )
 
+    def record_validation(
+        bundle_id: str,
+        runs: list[dict[str, object]],
+        repo_root: str | None = None,
+    ) -> dict[str, object]:
+        from repoctx.ops import op_record_validation
+
+        root = _resolve(repo_root)
+        return _run_op(
+            "record_validation",
+            bundle_id,
+            root,
+            lambda: op_record_validation(bundle_id, runs, repo_root=root),
+        )
+    _register(
+        "Report what the bundle's validation_plan commands actually returned. "
+        "`runs` is a list of {command, exit_code} — the commands you ran and "
+        "their exit status. Call this after running them, before you declare "
+        "done. Everything else repoctx records about validate_plan is that it "
+        "was *called*; this is the only signal that says whether validation "
+        "ran and whether it caught anything, which is what `repoctx eval` "
+        "reports as coverage and catch rate. A failing command is the "
+        "valuable case, not a reason to withhold the report — it is "
+        "validation doing its job. `bundle_id` is on the bundle response.",
+        record_validation,
+    )
+
     @server.tool()
     def reporting(
         action: str = "status",
