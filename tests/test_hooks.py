@@ -99,6 +99,22 @@ def _user_message(text: str = "do the thing") -> dict:
     }
 
 
+def _tool_result_echo(output: str = "ok") -> dict:
+    """A tool result as Claude Code records it: role "user", but not typed.
+
+    This is the shape that broke the turn boundary — 608 of these against 63
+    real user messages in the session that exposed it.
+    """
+    return {
+        "type": "user",
+        "toolUseResult": {"stdout": output},
+        "message": {
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "x", "content": output}],
+        },
+    }
+
+
 def test_stop_check_silent_when_no_edits(tmp_path: Path):
     transcript = tmp_path / "session.jsonl"
     transcript.write_text(_transcript(_user_message(), _tool_use("Read")))
@@ -142,6 +158,64 @@ def test_stop_check_only_inspects_current_turn(tmp_path: Path):
     )
     out = handle_stop({"transcript_path": str(transcript)})
     assert EXIT_REMINDER in out.stderr
+
+
+def test_stop_check_fires_when_tool_results_follow_the_edit(tmp_path: Path):
+    """The regression that made this hook dead in practice.
+
+    Every tool result is recorded with role "user", so treating the last
+    user-role message as the turn boundary collapsed the turn to whatever
+    followed the final tool call — usually nothing. A real session with 57
+    edits counted 0 and never fired.
+    """
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(
+        _transcript(
+            _user_message("fix the parser"),
+            _tool_use("Edit"),
+            _tool_result_echo(),
+            _tool_use("Bash"),
+            _tool_result_echo(),
+        )
+    )
+    edits, validates = count_turn_tool_uses(transcript.read_text())
+    assert (edits, validates) == (1, 0)
+    assert EXIT_REMINDER in handle_stop({"transcript_path": str(transcript)}).stderr
+
+
+def test_stop_check_silent_when_validate_follows_edits_across_echoes(tmp_path: Path):
+    """The other half: validate_plan still counts when echoes separate it."""
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(
+        _transcript(
+            _user_message("fix the parser"),
+            _tool_use("Edit"),
+            _tool_result_echo(),
+            _tool_use("mcp__repoctx__validate_plan"),
+            _tool_result_echo(),
+        )
+    )
+    assert handle_stop({"transcript_path": str(transcript)}).stderr == ""
+
+
+def test_echoes_do_not_reset_the_turn_boundary(tmp_path: Path):
+    """A prior turn's validate_plan must still not count, echoes or not."""
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(
+        _transcript(
+            _user_message("prior turn"),
+            _tool_use("Edit"),
+            _tool_result_echo(),
+            _tool_use("mcp__repoctx__validate_plan"),
+            _tool_result_echo(),
+            _user_message("new turn"),
+            _tool_use("Edit"),
+            _tool_result_echo(),
+        )
+    )
+    edits, validates = count_turn_tool_uses(transcript.read_text())
+    assert (edits, validates) == (1, 0)
+    assert EXIT_REMINDER in handle_stop({"transcript_path": str(transcript)}).stderr
 
 
 def test_stop_check_recognises_hook_style_tool_name(tmp_path: Path):

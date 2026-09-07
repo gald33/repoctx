@@ -246,9 +246,17 @@ def _relativize(file_path: str, repo_root: Path) -> str | None:
 def count_turn_tool_uses(transcript_text: str) -> tuple[int, int]:
     """Return ``(edit_count, validate_plan_count)`` for the current turn.
 
-    The "current turn" is everything after the last user-role message in the
-    JSONL transcript. If we cannot find a user message (unfamiliar shape),
-    we fall back to scanning the last ``TRANSCRIPT_TAIL_LINES`` lines.
+    The "current turn" is everything after the last message the *user* actually
+    typed. If we cannot find one (unfamiliar shape), we fall back to scanning
+    the last ``TRANSCRIPT_TAIL_LINES`` lines.
+
+    Every tool result is also recorded with ``role: "user"``, so "last
+    user-role message" is not the turn boundary — it is almost always the most
+    recent tool result. Taking it literally collapsed the turn to the handful
+    of lines after the final tool call, and this hook counted zero edits on a
+    2792-line session that contained 57 of them: 63 real user messages against
+    608 echoes. The reminder could therefore never fire, silently, for exactly
+    the long agentic stretches it exists to catch. Echoes are skipped here.
     """
     lines = transcript_text.splitlines()
     last_user_idx = -1
@@ -259,7 +267,7 @@ def count_turn_tool_uses(transcript_text: str) -> tuple[int, int]:
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if _is_user_message(obj):
+        if _is_user_message(obj) and not _is_tool_result_echo(obj):
             last_user_idx = idx
 
     if last_user_idx == -1:
@@ -292,6 +300,27 @@ def _is_user_message(obj: object) -> bool:
     msg = obj.get("message")
     if isinstance(msg, dict) and msg.get("role") == "user":
         return True
+    return False
+
+
+def _is_tool_result_echo(obj: object) -> bool:
+    """True if this user-role event is a tool result, not something typed.
+
+    Two markers, either sufficient: the harness stamps ``toolUseResult`` on the
+    event, and the message content carries a ``tool_result`` block. Checking
+    both keeps this working if either shape changes.
+    """
+    if not isinstance(obj, dict):
+        return False
+    if obj.get("toolUseResult") is not None:
+        return True
+    msg = obj.get("message")
+    content = msg.get("content") if isinstance(msg, dict) else obj.get("content")
+    if isinstance(content, list):
+        return any(
+            isinstance(block, dict) and block.get("type") == "tool_result"
+            for block in content
+        )
     return False
 
 
