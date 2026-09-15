@@ -158,6 +158,10 @@ def _refresh_index(repo: Path) -> None:
     migrate_legacy_index_if_needed(repo)
     result = refresh_base_index(repo, force=True, fetch=True, embed=True, build_if_missing=True)
     print(json.dumps(result, indent=2))
+    # A refresh that didn't take effect must not exit 0 — callers (and setup
+    # scripts) read the exit code as "the index is current now".
+    if result.get("status") in ("refresh_failed", "deps_missing", "error"):
+        raise SystemExit(1)
 
 
 # -- index --------------------------------------------------------------------

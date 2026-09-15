@@ -197,3 +197,127 @@ def test_read_path_probe_reports_stale_without_reembedding(tmp_path: Path) -> No
     from repoctx.embeddings import base_staleness_warning
 
     assert "repoctx index --refresh" in base_staleness_warning(result)
+
+
+# -- refresh truthfulness: status derived from disk, never from control flow --
+
+
+def test_refreshed_implies_indexed_sha_advanced(tmp_path: Path) -> None:
+    """`refreshed` must structurally imply indexed_sha == base_sha (post-op,
+    read back from disk), with the pre-op sha in previous_indexed_sha."""
+    remote, main, wt = _remote_repo(tmp_path)
+    shared = shared_embeddings_dir(wt)
+    with _patch_st():
+        build_index(wt, source="origin-main").save(shared)
+    old_sha = VectorIndex.load(shared).source_meta["base_sha"]
+
+    (main / "b.py").write_text("def b():\n    return 2\n", encoding="utf-8")
+    _commit_all(main, "add b")
+    _git(main, "push", "-q", "origin", "main")
+
+    with _patch_st():
+        result = refresh_base_index(wt, force=True)
+
+    assert result["status"] == "refreshed"
+    assert result["indexed_sha"] == result["base_sha"]
+    assert result["previous_indexed_sha"] == old_sha
+    assert result["indexed_sha"] != old_sha
+    # And the reported sha is what disk actually says.
+    assert VectorIndex.load(shared).source_meta["base_sha"] == result["indexed_sha"]
+
+
+def test_empty_scan_does_not_destroy_index_or_claim_refreshed(tmp_path: Path) -> None:
+    """A transient git failure makes the git-objects scan come back empty.
+    That must NOT replace a populated index, advance the sha, or say
+    `refreshed` — it reports refresh_failed and leaves disk untouched."""
+    from repoctx.models import RepositoryIndex
+
+    remote, main, wt = _remote_repo(tmp_path)
+    shared = shared_embeddings_dir(wt)
+    with _patch_st():
+        build_index(wt, source="origin-main").save(shared)
+    before_paths = _index_paths(shared)
+    before_sha = VectorIndex.load(shared).source_meta["base_sha"]
+
+    (main / "b.py").write_text("y = 1\n", encoding="utf-8")
+    _commit_all(main, "add b")
+    _git(main, "push", "-q", "origin", "main")
+
+    with _patch_st(), patch(
+        "repoctx.git_tree.scan_git_tree",
+        lambda root, ref, config=None, **kw: RepositoryIndex(root=Path(root)),
+    ):
+        result = refresh_base_index(wt, force=True)
+
+    assert result["status"] == "refresh_failed"
+    assert "no chunks" in result["reason"]
+    assert result["indexed_sha"] == before_sha  # unmoved, truthfully reported
+    assert _index_paths(shared) == before_paths  # disk untouched
+    assert VectorIndex.load(shared).source_meta["base_sha"] == before_sha
+
+
+def test_builder_returning_stale_meta_is_not_persisted_as_refreshed(
+    tmp_path: Path,
+) -> None:
+    """If the builder hands back an index that does not target the resolved
+    sha (base moved mid-run, or a metadata bug), refresh must refuse to save
+    it and must not claim success."""
+    import repoctx.embeddings as emb
+    from repoctx.vector_index import IndexEntry
+
+    remote, main, wt = _remote_repo(tmp_path)
+    shared = shared_embeddings_dir(wt)
+    with _patch_st():
+        build_index(wt, source="origin-main").save(shared)
+    old_sha = VectorIndex.load(shared).source_meta["base_sha"]
+
+    (main / "b.py").write_text("y = 1\n", encoding="utf-8")
+    _commit_all(main, "add b")
+    _git(main, "push", "-q", "origin", "main")
+
+    stale = VectorIndex(
+        vectors=numpy.zeros((1, 8), dtype=numpy.float32),
+        entries=[IndexEntry(path="a.py", kind="code", content_hash="h")],
+        model_name="spy",
+        dimension=8,
+        source_meta={"built_from": "origin-main", "base_sha": old_sha},
+    )
+    with _patch_st(), patch.object(emb, "build_index", lambda *a, **kw: stale):
+        result = emb.refresh_base_index(wt, force=True)
+
+    assert result["status"] == "refresh_failed"
+    assert "builder returned" in result["reason"]
+    assert VectorIndex.load(shared).source_meta["base_sha"] == old_sha  # not saved
+
+
+def test_refresh_failed_produces_read_path_warning(tmp_path: Path) -> None:
+    from repoctx.embeddings import base_staleness_warning
+
+    warning = base_staleness_warning(
+        {
+            "status": "refresh_failed",
+            "base_sha": "b" * 40,
+            "indexed_sha": "a" * 40,
+            "reason": "the fresh scan produced no chunks",
+        }
+    )
+    assert warning is not None
+    assert "did NOT take effect" in warning
+    assert "no chunks" in warning
+    assert "repoctx index --refresh" in warning
+
+
+def test_cli_refresh_exits_nonzero_when_refresh_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`repoctx index --refresh` must not exit 0 when the refresh didn't take."""
+    import repoctx.embeddings as emb
+    from repoctx.commands.index import _refresh_index
+
+    monkeypatch.setattr(
+        emb, "refresh_base_index",
+        lambda *a, **kw: {"status": "refresh_failed", "reason": "nope"},
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        _refresh_index(tmp_path)
+    assert exc_info.value.code == 1

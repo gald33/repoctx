@@ -295,7 +295,7 @@ Design doc: [`docs/plans/2026-04-23-repoctx-v2-design.md`](docs/plans/2026-04-23
 
 Both nudges read Claude Code's hook JSON from stdin and **always exit 0** — they never block the user's flow. The entry nudge stays silent for short, keyword-free prompts. The exit nudge stays silent when there were no edits, or when `validate_plan` was already called this turn. Hook entries are detected by command prefix on re-install, so re-running `repoctx install` is safe.
 
-The anchored `<!-- repoctx-nudge -->` block placed in `CLAUDE.md` / `AGENTS.md` ships with current wording (must-call + inline definition of "non-trivial"). Older anchored blocks from earlier installs are rewritten in place on the next `install` / `refresh` without touching surrounding doc content.
+The anchored `<!-- repoctx-nudge -->` block placed in `CLAUDE.md` / `AGENTS.md` ships with current wording (v3): a **behavioural trigger** — call `bundle` *before you go looking for code you cannot already name* — instead of the old "is this task non-trivial?" gate, which asked for a judgment the agent can't make before understanding the task and was measurably ignored. Canonical older blocks from earlier installs are rewritten in place on the next `install` / `refresh` without touching surrounding doc content; a block you **hand-edited** is left alone with a warning instead of being silently reverted.
 
 **Tuning / opt-out:**
 
@@ -560,7 +560,7 @@ More detail: **[docs/experiment-mcp-suppression.md](docs/experiment-mcp-suppress
 - *Overlay scope.* Only *your* worktree's delta is overlaid. Sibling worktrees' uncommitted bytes are deliberately never indexed (dirty, half-finished, multi-tool) — the advisory lane uses committed branch tips instead.
 - *Advisory authority.* The advisory lane is a separate index and a separate response key; it is never merged into authoritative results, preserving the bundle's trust model (authoritative = live origin/main + your overlay only).
 
-**Nudge block format.** The anchored `<!-- repoctx-nudge -->` block in `CLAUDE.md` / `AGENTS.md` evolved between releases. Older anchored blocks are rewritten in place on the next `install` / `refresh` without touching surrounding doc content — no manual cleanup needed.
+**Nudge block format.** The anchored `<!-- repoctx-nudge -->` block in `CLAUDE.md` / `AGENTS.md` evolved between releases (v3 replaced the "non-trivial task" gate with a search-moment trigger). Canonical older blocks are rewritten in place on the next `install` / `refresh` without touching surrounding doc content — no manual cleanup needed. A hand-edited older block is deliberately **not** upgraded: the installer warns and leaves it byte-identical, so a local policy edit never reverts invisibly.
 
 ---
 

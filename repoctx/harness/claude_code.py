@@ -228,12 +228,49 @@ AGENTS_MD_FILENAME = "AGENTS.md"
 
 NUDGE_MARKER_V1 = "<!-- repoctx-nudge:v1 -->"
 NUDGE_MARKER_V2 = "<!-- repoctx-nudge:v2 -->"
+NUDGE_MARKER_V3 = "<!-- repoctx-nudge:v3 -->"
 # ``NUDGE_MARKER`` always points at the current scaffold version. Existing
-# code that imports it stays correct; tests that need to detect the older
-# generation specifically should import ``NUDGE_MARKER_V1``.
-NUDGE_MARKER = NUDGE_MARKER_V2
+# code that imports it stays correct; tests that need to detect an older
+# generation specifically should import ``NUDGE_MARKER_V1`` / ``_V2``.
+NUDGE_MARKER = NUDGE_MARKER_V3
 
+# The v2 wording gated the call on "is this task non-trivial?" — a category
+# judgment the agent must make BEFORE it understands the task, which is
+# exactly when it can't. Measured on an actively-developed downstream repo:
+# 11 bundle calls in 30 days across every agent, during a period of several
+# merged PRs per day — a rule nobody applies. v3 replaces the category with a
+# behavioural trigger the agent can recognise from inside the task: the
+# moment it is about to search for code it cannot already name. Every line is
+# a ``>`` blockquote line (including the fenced code) so the anchored-block
+# matcher that upgrades old installs in place keeps working across versions.
 NUDGE_BLOCK = """\
+<!-- repoctx-nudge:v3 -->
+> **repoctx is installed for this repo. Call it at the moment it pays, which
+> is BEFORE you go looking for code you cannot already name:**
+>
+> ```
+> mcp__repoctx__bundle(task)
+> ```
+>
+> About to grep for where something lives? Guess which module owns a
+> behaviour? Follow a hunch about the cause of a bug? **Call it first.**
+> That is the whole trigger.
+>
+> Also:
+> - `mcp__repoctx__validate_plan` + `mcp__repoctx__risk_report` before you
+>   call a change done.
+> - `mcp__repoctx__authority(task)` when unsure whether a change violates a
+>   constraint — do not guess.
+> - **Read the bundle's `warnings`, and report a stale index rather than
+>   trusting it.** A bundle built on a stale base answers confidently about
+>   a repo that has moved.
+"""
+
+# The exact v2 block earlier installs wrote, kept verbatim so the upgrader can
+# tell "our canonical v2 text" from "a v2 block an operator hand-edited". Only
+# the former is replaced; the latter is a deliberate local decision we must
+# not silently revert (see _insert_nudge_into_file).
+NUDGE_BLOCK_V2 = """\
 <!-- repoctx-nudge:v2 -->
 > **repoctx is installed for this repo.** For any non-trivial task you
 > **must call** `mcp__repoctx__bundle(task)` before proposing a plan, and
@@ -273,6 +310,7 @@ ACTION_SKIPPED = "skipped"
 ACTION_NO_OP = "no_op"
 ACTION_NUDGE_INSERTED = "nudge_inserted"
 ACTION_POINTER_CREATED = "pointer_created"
+ACTION_SKIPPED_MODIFIED = "skipped_modified"
 
 
 @dataclass(slots=True)
@@ -281,8 +319,10 @@ class NudgeResult:
 
     ``*_action`` is one of ``skipped`` (feature disabled or file absent and
     not actionable), ``no_op`` (file already had the block), ``nudge_inserted``
-    (block was added on this run), or ``pointer_created`` (CLAUDE.md only —
-    the file was created as a thin ``@AGENTS.md`` pointer).
+    (block was added or upgraded on this run), ``pointer_created`` (CLAUDE.md
+    only — the file was created as a thin ``@AGENTS.md`` pointer), or
+    ``skipped_modified`` (an older block was found but its text was
+    hand-edited, so the upgrade was refused — see _insert_nudge_into_file).
     """
 
     claude_md: Path
@@ -429,11 +469,9 @@ def ensure_claude_md_nudge(
 
     # Insert the nudge wherever there's substantive content.
     if claude_state == "content":
-        if _insert_nudge_into_file(claude_md):
-            claude_action = ACTION_NUDGE_INSERTED
+        claude_action = _insert_nudge_into_file(claude_md)
     if agents_state == "content":
-        if _insert_nudge_into_file(agents_md):
-            agents_action = ACTION_NUDGE_INSERTED
+        agents_action = _insert_nudge_into_file(agents_md)
 
     return NudgeResult(
         claude_md=claude_md,
@@ -479,58 +517,118 @@ def _create_pointer_claude_md(path: Path) -> None:
     path.write_text(POINTER_TEMPLATE, encoding="utf-8")
 
 
-def _insert_nudge_into_file(path: Path) -> bool:
+def _insert_nudge_into_file(path: Path) -> str:
     """Insert or upgrade the nudge block in ``path``. Idempotent.
 
-    - v2 marker present → no-op.
-    - v1 marker present → rewrite the v1 block in place with the v2 block,
-      preserving everything before/after it.
-    - Neither marker → insert v2 block via :func:`_render_with_nudge_inserted`.
+    Returns an ``ACTION_*`` string:
+
+    - v3 marker present → ``no_op``. Whatever the block now says is left
+      byte-identical, so hand edits to the *current* block are never touched.
+    - v2 marker present and the block still matches the canonical v2 text we
+      shipped → rewritten in place with the v3 block → ``nudge_inserted``.
+    - v2 marker present but the block text differs from canonical → an
+      operator deliberately edited it; silently reverting that would undo a
+      local decision invisibly. The file is left byte-identical, a warning
+      names it → ``skipped_modified``.
+    - v1 marker present → rewritten in place with the v3 block →
+      ``nudge_inserted``. (The v1 wording predates the canonical-text
+      constant, so hand-edit detection can't apply; v1 upgrades have always
+      replaced the block and keeping that avoids stranding v1 installs.)
+    - No marker → v3 block inserted via :func:`_render_with_nudge_inserted`
+      → ``nudge_inserted``.
     """
     text = path.read_text(encoding="utf-8")
+    if NUDGE_MARKER_V3 in text:
+        return ACTION_NO_OP
     if NUDGE_MARKER_V2 in text:
-        return False
-    if NUDGE_MARKER_V1 in text:
-        upgraded = _upgrade_v1_nudge_block(text)
+        if not _anchored_block_matches(text, NUDGE_MARKER_V2, NUDGE_BLOCK_V2):
+            logger.warning(
+                "The %s block in %s was hand-edited (it no longer matches the "
+                "canonical v2 text), so it was NOT upgraded to v3. To adopt "
+                "the new wording, replace the block with the current one from "
+                "repoctx (or delete it and re-run `repoctx install`).",
+                NUDGE_MARKER_V2, path,
+            )
+            return ACTION_SKIPPED_MODIFIED
+        upgraded = _replace_anchored_block(text, NUDGE_MARKER_V2)
         if upgraded == text:
-            return False
+            return ACTION_NO_OP
         path.write_text(upgraded, encoding="utf-8")
-        return True
+        return ACTION_NUDGE_INSERTED
+    if NUDGE_MARKER_V1 in text:
+        upgraded = _replace_anchored_block(text, NUDGE_MARKER_V1)
+        if upgraded == text:
+            return ACTION_NO_OP
+        path.write_text(upgraded, encoding="utf-8")
+        return ACTION_NUDGE_INSERTED
     path.write_text(_render_with_nudge_inserted(text), encoding="utf-8")
-    return True
+    return ACTION_NUDGE_INSERTED
 
 
-def _upgrade_v1_nudge_block(text: str) -> str:
-    """Replace the v1 anchored block with the v2 block, preserving surroundings.
+def _find_anchored_block(lines: list[str], marker: str) -> tuple[int, int] | None:
+    """Locate ``[start, end)`` of an anchored nudge block in ``lines``.
 
-    The v1 block we wrote is a single ``<!-- repoctx-nudge:v1 -->`` marker
-    line followed by a contiguous run of blockquote lines starting with
-    ``>``. The block ends at the first non-blockquote, non-blank line (or
-    EOF). We match that range and substitute the v2 block in its place.
+    A block is the marker line followed by a contiguous run of blockquote
+    lines starting with ``>``. It ends at the first non-blockquote line
+    (a blank line stays outside the block, as the separator) or EOF. Every
+    shipped block generation — v1 through v3, including v3's fenced code —
+    keeps all lines ``>``-prefixed precisely so this matcher stays valid
+    across upgrades.
     """
-    lines = text.splitlines(keepends=True)
     start = None
     for i, line in enumerate(lines):
-        if line.rstrip("\n") == NUDGE_MARKER_V1:
+        if line.strip() == marker:  # tolerate editor whitespace around the marker
             start = i
             break
     if start is None:
-        return text
-
+        return None
     end = start + 1
     while end < len(lines):
-        stripped = lines[end].lstrip()
-        if stripped.startswith(">"):
+        if lines[end].lstrip().startswith(">"):
             end += 1
             continue
-        if lines[end].strip() == "":
-            # A blank line inside the block terminates the block. We stop
-            # before it so the blank line stays as the separator.
-            break
         break
+    return start, end
 
+
+def _anchored_block_matches(text: str, marker: str, canonical: str) -> bool:
+    """True iff the anchored block in ``text`` equals ``canonical``'s text.
+
+    Compared line-by-line with trailing whitespace stripped and trailing
+    blank lines dropped, so editor whitespace churn doesn't read as a hand
+    edit while any wording change does.
+    """
+    lines = text.splitlines(keepends=True)
+    span = _find_anchored_block(lines, marker)
+    if span is None:
+        return False
+
+    def _norm(block_lines: list[str]) -> list[str]:
+        out = [ln.rstrip() for ln in block_lines]
+        while out and not out[-1]:
+            out.pop()
+        return out
+
+    found = _norm(lines[span[0]:span[1]])
+    expected = _norm(canonical.splitlines())
+    return found == expected
+
+
+def _replace_anchored_block(text: str, marker: str) -> str:
+    """Replace the anchored block at ``marker`` with the current NUDGE_BLOCK,
+    preserving everything before and after it byte-for-byte."""
+    lines = text.splitlines(keepends=True)
+    span = _find_anchored_block(lines, marker)
+    if span is None:
+        return text
     new_block = NUDGE_BLOCK if NUDGE_BLOCK.endswith("\n") else NUDGE_BLOCK + "\n"
-    return "".join(lines[:start]) + new_block + "".join(lines[end:])
+    return "".join(lines[:span[0]]) + new_block + "".join(lines[span[1]:])
+
+
+# Backward-compat shim: the old single-version upgrader name, now expressed
+# through the generalized block machinery.
+def _upgrade_v1_nudge_block(text: str) -> str:
+    return _replace_anchored_block(text, NUDGE_MARKER_V1)
 
 
 def _nudge_disabled_in_env() -> bool:
@@ -741,6 +839,7 @@ __all__ = [
     "ACTION_NUDGE_INSERTED",
     "ACTION_POINTER_CREATED",
     "ACTION_SKIPPED",
+    "ACTION_SKIPPED_MODIFIED",
     "AGENTS_MD_FILENAME",
     "AGENTS_SECTION_HEADER",
     "CLAUDE_MD_FILENAME",
@@ -752,9 +851,11 @@ __all__ = [
     "HOOK_MATCHER",
     "InstallResult",
     "NUDGE_BLOCK",
+    "NUDGE_BLOCK_V2",
     "NUDGE_MARKER",
     "NUDGE_MARKER_V1",
     "NUDGE_MARKER_V2",
+    "NUDGE_MARKER_V3",
     "NudgeResult",
     "POINTER_MARKER",
     "PROMPT_NUDGE_COMMAND",

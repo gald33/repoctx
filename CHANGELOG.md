@@ -6,6 +6,66 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Fixed — `index --refresh` can no longer report success it didn't deliver
+
+A field report showed `repoctx index --refresh` printing `"status":
+"refreshed"` with exit 0 while `indexed_sha` sat unchanged next to
+`"changed": 35` — and the next `bundle` still warned the index was stale. The
+status was asserted from control flow; nothing checked what actually got
+persisted, so callers (including our own bundle warning, which points at this
+command as the remedy) trusted a field that could contradict the data beside
+it.
+
+- **Status is now derived from disk.** After the embed pass, the persisted
+  `source_meta.base_sha` is read back; `refreshed` / `built` are only
+  claimable when it equals the target. `indexed_sha` now always answers
+  "what sha does the on-disk index reflect *after* this call", so
+  `refreshed` structurally implies `indexed_sha == base_sha`;
+  `previous_indexed_sha` carries where the index stood before.
+- **New terminal status `refresh_failed`** (with a `reason`) for every way
+  the persisted index can fail to reach the target: builder targeted the
+  wrong sha (refused before saving), or the read-back disagrees after saving.
+  The read path turns it into a loud bundle warning; `repoctx index
+  --refresh` now exits 1 on it instead of 0.
+- **An empty scan can no longer destroy the index.** A transient git-objects
+  read failure (cat-file timeout, `.git` contention) used to come back as an
+  empty tree, and the "refresh" would replace a populated index with a hollow
+  one — advancing the sha and reporting success. Refresh now refuses to save
+  a zero-chunk result over a populated index and reports `refresh_failed`.
+- Triage note on the reported stale `.pending.lock`: the queue lock is
+  `flock`-based, released by the kernel on process death — a leftover lock
+  *file* is inert and is not consulted by the refresh path at all (and
+  `._.pending.lock` is macOS AppleDouble metadata, not a lock).
+
+### Changed — the installed nudge is now a behavioural trigger, not a category gate (v3)
+
+The v2 block gated the bundle call on "is this task non-trivial?" — a judgment
+the agent has to make *before* it understands the task, which is exactly when
+it can't, and there's a plausible argument against every time. Measured on an
+actively-developed downstream repo: 11 `bundle` calls in 30 days across every
+agent working it, during a stretch averaging several merged PRs per day — a
+rule nobody applies. Skipping it has a concrete cost: on that same repo, an
+agent burned an entire run hand-tracing a data-corruption bug two layers past
+the file the roadmap named, a path the bundle would have returned.
+
+- **`<!-- repoctx-nudge:v3 -->`** binds the call to an observable moment
+  instead: *call `bundle` before you go looking for code you cannot already
+  name* — about to grep for where something lives, guess which module owns a
+  behaviour, or follow a hunch about a bug's cause. It also tells the agent to
+  **read the bundle's `warnings` and report a stale index rather than trust
+  it** — an obeyed rule can still mislead when the base is behind.
+- **In-place upgrade.** `install` / `refresh` replace a canonical v1 or v2
+  block with v3, preserving surrounding content, exactly as before.
+- **Hand edits are never silently reverted.** A v2 block whose text no longer
+  matches what repoctx shipped is a deliberate local decision: the installer
+  now leaves the file byte-identical, logs a warning naming it, and reports
+  the new `skipped_modified` action instead of clobbering. (Edits to the
+  *current* block were always safe: marker present → no-op.) Whitespace-only
+  churn still counts as canonical.
+- Every line of the shipped block stays `>`-blockquoted (including the fenced
+  code) so the anchored-block matcher keeps working for future upgrades; a
+  test now pins that property.
+
 ## [1.16.0] — 2026-09-07
 
 ### Added — measure whether validation ran, and whether it caught anything

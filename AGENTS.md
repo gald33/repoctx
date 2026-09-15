@@ -107,13 +107,23 @@ For any non-trivial task in this repo:
 Every repoctx response includes `when_to_recall_repoctx` and `before_finalize_checklist`. Follow them.
 
 
-<!-- repoctx-nudge:v2 -->
-> **repoctx is installed for this repo.** For any non-trivial task you
-> **must call** `mcp__repoctx__bundle(task)` before proposing a plan, and
-> `mcp__repoctx__validate_plan` + `mcp__repoctx__risk_report` before
-> declaring done. Use `mcp__repoctx__authority(task)` if unsure whether
-> a change violates a constraint.
+<!-- repoctx-nudge:v3 -->
+> **repoctx is installed for this repo. Call it at the moment it pays, which
+> is BEFORE you go looking for code you cannot already name:**
 >
-> **Non-trivial = touches >1 file OR introduces new behavior OR
-> adds/removes a public API.** Single-file typo/rename/comment-only
-> changes are trivial.
+> ```
+> mcp__repoctx__bundle(task)
+> ```
+>
+> About to grep for where something lives? Guess which module owns a
+> behaviour? Follow a hunch about the cause of a bug? **Call it first.**
+> That is the whole trigger.
+>
+> Also:
+> - `mcp__repoctx__validate_plan` + `mcp__repoctx__risk_report` before you
+>   call a change done.
+> - `mcp__repoctx__authority(task)` when unsure whether a change violates a
+>   constraint — do not guess.
+> - **Read the bundle's `warnings`, and report a stale index rather than
+>   trusting it.** A bundle built on a stale base answers confidently about
+>   a repo that has moved.
