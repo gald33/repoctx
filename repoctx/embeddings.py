@@ -835,8 +835,18 @@ def refresh_base_index(
     Status values: ``current`` (already at origin/main), ``refreshed``
     (re-embedded the delta), ``built`` (built from scratch), ``stale`` /
     ``stale_large`` (origin/main advanced but we only reported — ``embed`` off
-    or delta over the cap), ``no_base`` (no resolvable base ref),
-    ``no_index`` (nothing built and ``build_if_missing`` off), ``deps_missing``.
+    or delta over the cap), ``refresh_failed`` (an embed pass ran or was
+    requested but the persisted index did NOT end up at the target sha — see
+    ``reason``), ``no_base`` (no resolvable base ref), ``no_index`` (nothing
+    built and ``build_if_missing`` off), ``deps_missing``.
+
+    Field semantics — ``indexed_sha`` always answers "what sha does the
+    on-disk index reflect *now*, after this call": for ``refreshed``/``built``
+    it is read back from the persisted metadata (so ``refreshed`` structurally
+    implies ``indexed_sha == base_sha`` — the status can never contradict the
+    shas beside it); for the report-only statuses it is the untouched on-disk
+    sha. ``previous_indexed_sha`` on ``refreshed``/``refresh_failed`` is where
+    the index stood before the attempt.
 
     ``fetch`` runs a TTL-gated ``git fetch origin main`` first. ``embed`` False
     turns this into a cheap drift *probe* (no re-embedding) for the read path.
@@ -861,12 +871,22 @@ def refresh_base_index(
             return {"status": "no_index", "base_ref": ref, "base_sha": sha}
         result = build_index(root, config=config, incremental=False, source="origin-main")
         result.save(index_dir)
-        return {"status": "built", "base_ref": ref, "base_sha": sha}
+        persisted = _persisted_base_sha(index_dir)
+        if persisted != sha:
+            return {
+                "status": "refresh_failed", "base_ref": ref, "base_sha": sha,
+                "indexed_sha": persisted, "previous_indexed_sha": None,
+                "reason": (
+                    f"full build persisted base_sha {persisted or 'none'} "
+                    f"instead of the target {sha}"
+                ),
+            }
+        return {"status": "built", "base_ref": ref, "base_sha": sha, "indexed_sha": persisted}
 
     meta = existing.source_meta or {}
     indexed_sha = meta.get("base_sha")
     if not force and meta.get("built_from") == "origin-main" and indexed_sha == sha:
-        return {"status": "current", "base_ref": ref, "base_sha": sha}
+        return {"status": "current", "base_ref": ref, "base_sha": sha, "indexed_sha": sha}
 
     changed = _count_changed_files(root, indexed_sha, sha)
     if not force and not embed:
@@ -881,11 +901,75 @@ def refresh_base_index(
             "indexed_sha": indexed_sha, "changed": changed,
         }
     result = build_index(root, config=config, incremental=True, source="origin-main")
+
+    # Refuse to replace a populated index with a hollow rebuild. A transient
+    # git failure (cat-file timeout, .git contention) makes the git-objects
+    # scan come back empty; without this guard that "success" would destroy
+    # the index, advance nothing, and still print `refreshed`.
+    if len(result) == 0 and len(existing) > 0:
+        return {
+            "status": "refresh_failed", "base_ref": ref, "base_sha": sha,
+            "indexed_sha": indexed_sha, "previous_indexed_sha": indexed_sha,
+            "changed": changed,
+            "reason": (
+                "the fresh scan produced no chunks while the existing index "
+                f"has {len(existing)}; not saving (transient git read "
+                "failure?) — the existing index was left untouched"
+            ),
+        }
+    # The builder must have targeted the sha we resolved; a mismatch here
+    # (e.g. the base moved mid-run, or a builder bug reused old metadata)
+    # must not be persisted as if it were the refresh we reported.
+    built_sha = (result.source_meta or {}).get("base_sha")
+    if built_sha != sha:
+        return {
+            "status": "refresh_failed", "base_ref": ref, "base_sha": sha,
+            "indexed_sha": indexed_sha, "previous_indexed_sha": indexed_sha,
+            "changed": changed,
+            "reason": (
+                f"builder returned base_sha {built_sha or 'none'} instead of "
+                f"the target {sha}; not saving"
+            ),
+        }
     result.save(index_dir)
+    # Trust disk, not control flow: `refreshed` is only claimable when the
+    # persisted metadata actually advanced to the target sha.
+    persisted = _persisted_base_sha(index_dir)
+    if persisted != sha:
+        return {
+            "status": "refresh_failed", "base_ref": ref, "base_sha": sha,
+            "indexed_sha": persisted, "previous_indexed_sha": indexed_sha,
+            "changed": changed,
+            "reason": (
+                f"save completed but the persisted base_sha reads back as "
+                f"{persisted or 'none'}, not the target {sha}"
+            ),
+        }
     return {
         "status": "refreshed", "base_ref": ref, "base_sha": sha,
-        "indexed_sha": indexed_sha, "changed": changed,
+        "indexed_sha": persisted, "previous_indexed_sha": indexed_sha,
+        "changed": changed,
     }
+
+
+def _persisted_base_sha(index_dir: Path) -> str | None:
+    """The ``source_meta.base_sha`` the on-disk index actually carries.
+
+    Read back from ``index_config.json`` (cheap — no vectors load) so refresh
+    statuses are derived from what was persisted, never from the code path
+    that believes it persisted it. ``None`` when unreadable/absent.
+    """
+    import json as _j
+
+    try:
+        cfg = _j.loads((index_dir / "index_config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    meta = cfg.get("source_meta")
+    if not isinstance(meta, dict):
+        return None
+    sha = meta.get("base_sha")
+    return sha if isinstance(sha, str) and sha else None
 
 
 def maybe_refresh_base_on_read(
@@ -923,6 +1007,16 @@ def base_staleness_warning(status: dict) -> str | None:
             f"origin/main has advanced {delta}past the indexed base "
             f"({indexed}..{base}); landed work may be missing from retrieval{tail}. "
             f"Run `repoctx index --refresh` to re-embed."
+        )
+    if st == "refresh_failed":
+        indexed = (status.get("indexed_sha") or "")[:12] or "unknown"
+        base = (status.get("base_sha") or "")[:12]
+        reason = status.get("reason") or "unknown reason"
+        return (
+            f"an index refresh did NOT take effect ({reason}); the index is "
+            f"still at {indexed}, behind origin/main {base} — landed work may "
+            f"be missing from retrieval. Retry `repoctx index --refresh`, or "
+            f"`repoctx rebuild` if it keeps failing."
         )
     return None
 
