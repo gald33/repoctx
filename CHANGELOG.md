@@ -6,6 +6,35 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Changed — the installed nudge is now a behavioural trigger, not a category gate (v3)
+
+The v2 block gated the bundle call on "is this task non-trivial?" — a judgment
+the agent has to make *before* it understands the task, which is exactly when
+it can't, and there's a plausible argument against every time. Measured on an
+actively-developed downstream repo: 11 `bundle` calls in 30 days across every
+agent working it, during a stretch averaging several merged PRs per day — a
+rule nobody applies. Skipping it has a concrete cost: on that same repo, an
+agent burned an entire run hand-tracing a data-corruption bug two layers past
+the file the roadmap named, a path the bundle would have returned.
+
+- **`<!-- repoctx-nudge:v3 -->`** binds the call to an observable moment
+  instead: *call `bundle` before you go looking for code you cannot already
+  name* — about to grep for where something lives, guess which module owns a
+  behaviour, or follow a hunch about a bug's cause. It also tells the agent to
+  **read the bundle's `warnings` and report a stale index rather than trust
+  it** — an obeyed rule can still mislead when the base is behind.
+- **In-place upgrade.** `install` / `refresh` replace a canonical v1 or v2
+  block with v3, preserving surrounding content, exactly as before.
+- **Hand edits are never silently reverted.** A v2 block whose text no longer
+  matches what repoctx shipped is a deliberate local decision: the installer
+  now leaves the file byte-identical, logs a warning naming it, and reports
+  the new `skipped_modified` action instead of clobbering. (Edits to the
+  *current* block were always safe: marker present → no-op.) Whitespace-only
+  churn still counts as canonical.
+- Every line of the shipped block stays `>`-blockquoted (including the fenced
+  code) so the anchored-block matcher keeps working for future upgrades; a
+  test now pins that property.
+
 ## [1.16.0] — 2026-09-07
 
 ### Added — measure whether validation ran, and whether it caught anything

@@ -522,21 +522,37 @@ def test_install_to_dict_includes_claude_md_action(tmp_path: Path) -> None:
     assert payload["agents_md_nudge_changed"] is True
 
 
-# -- v2 anchor block (stronger directive + non-trivial definition) ----------
+# -- v3 anchor block (behavioural trigger, not a category judgment) ----------
 
 
-def test_install_writes_v2_anchor_block(tmp_path: Path) -> None:
-    """New installs ship the v2 marker with the "you must call" wording."""
+def test_install_writes_v3_anchor_block(tmp_path: Path) -> None:
+    """New installs ship the v3 marker with the search-trigger wording."""
     (tmp_path / "CLAUDE.md").write_text("# Project\n\nContent.\n")
     install_claude_code(tmp_path)
     text = (tmp_path / "CLAUDE.md").read_text()
-    assert "<!-- repoctx-nudge:v2 -->" in text
-    assert "**must call**" in text
-    assert "Non-trivial =" in text
+    assert "<!-- repoctx-nudge:v3 -->" in text
+    assert "BEFORE you go looking for code you cannot already name" in text
+    assert "That is the whole trigger." in text
+    assert "Read the bundle's `warnings`" in text
+    # The abandoned category gate must be gone.
+    assert "Non-trivial =" not in text
+
+
+def test_v3_block_is_entirely_blockquoted(tmp_path: Path) -> None:
+    """Every non-marker line of the shipped block must start with `>` — the
+    in-place upgrader for future versions matches a contiguous blockquote run,
+    so a bare line (e.g. an unquoted code fence) would truncate the block."""
+    from repoctx.harness.claude_code import NUDGE_BLOCK, NUDGE_MARKER_V3
+
+    lines = NUDGE_BLOCK.splitlines()
+    assert lines[0] == NUDGE_MARKER_V3
+    assert lines[1:], "block must have a body"
+    for line in lines[1:]:
+        assert line.startswith(">"), f"non-blockquote line in NUDGE_BLOCK: {line!r}"
 
 
 def test_install_upgrades_v1_anchor_block_in_place(tmp_path: Path) -> None:
-    """v1 marker present → block is rewritten in place to v2, surroundings preserved."""
+    """v1 marker present → block is rewritten in place to v3, surroundings preserved."""
     from repoctx.harness.claude_code import NUDGE_MARKER_V1
 
     before = (
@@ -554,16 +570,67 @@ def test_install_upgrades_v1_anchor_block_in_place(tmp_path: Path) -> None:
     after = (tmp_path / "CLAUDE.md").read_text()
 
     assert NUDGE_MARKER_V1 not in after
-    assert "<!-- repoctx-nudge:v2 -->" in after
-    assert "**must call**" in after
+    assert "<!-- repoctx-nudge:v3 -->" in after
+    assert "cannot already name" in after
     assert "Some intro line." in after
     assert "Don't touch me." in after
-    # Exactly one v2 marker — migration shouldn't have stacked blocks.
-    assert after.count("<!-- repoctx-nudge:v2 -->") == 1
+    # Exactly one v3 marker — migration shouldn't have stacked blocks.
+    assert after.count("<!-- repoctx-nudge:v3 -->") == 1
 
 
-def test_v1_to_v2_migration_is_idempotent(tmp_path: Path) -> None:
-    """A second install after the v1→v2 migration is a no-op."""
+def test_install_upgrades_canonical_v2_block_in_place(tmp_path: Path) -> None:
+    """The exact v2 text earlier installs wrote is replaced by v3 in place."""
+    from repoctx.harness.claude_code import NUDGE_BLOCK_V2, NUDGE_MARKER_V2
+
+    before = f"# Project\n\nIntro.\n\n{NUDGE_BLOCK_V2}\n## After\n\nKeep me.\n"
+    (tmp_path / "CLAUDE.md").write_text(before)
+    result = install_claude_code(tmp_path)
+    after = (tmp_path / "CLAUDE.md").read_text()
+
+    assert result.claude_md_action == ACTION_NUDGE_INSERTED
+    assert NUDGE_MARKER_V2 not in after
+    assert "<!-- repoctx-nudge:v3 -->" in after
+    assert "Intro." in after and "Keep me." in after
+    assert after.count("repoctx-nudge:") == 1
+
+
+def test_install_skips_hand_edited_v2_block(tmp_path: Path) -> None:
+    """A v2 block whose text was locally edited must NOT be reverted:
+    the file stays byte-identical and the action reports skipped_modified."""
+    from repoctx.harness.claude_code import ACTION_SKIPPED_MODIFIED, NUDGE_MARKER_V2
+
+    before = (
+        "# Project\n\n"
+        f"{NUDGE_MARKER_V2}\n"
+        "> **repoctx is installed for this repo.** Our team policy: call\n"
+        "> `mcp__repoctx__bundle(task)` only for cross-module work.\n"
+        "\n"
+        "Body.\n"
+    )
+    (tmp_path / "CLAUDE.md").write_text(before)
+    result = install_claude_code(tmp_path)
+
+    assert result.claude_md_action == ACTION_SKIPPED_MODIFIED
+    assert result.claude_md_changed is False
+    assert (tmp_path / "CLAUDE.md").read_text() == before
+    # Re-running keeps skipping — never a flip-flop.
+    second = install_claude_code(tmp_path)
+    assert second.claude_md_action == ACTION_SKIPPED_MODIFIED
+
+
+def test_v2_whitespace_churn_is_not_a_hand_edit(tmp_path: Path) -> None:
+    """Trailing-whitespace differences alone must still count as canonical."""
+    from repoctx.harness.claude_code import NUDGE_BLOCK_V2
+
+    churned = "\n".join(ln + "  " for ln in NUDGE_BLOCK_V2.splitlines()) + "\n"
+    (tmp_path / "CLAUDE.md").write_text(f"# Project\n\n{churned}\nBody.\n")
+    result = install_claude_code(tmp_path)
+    assert result.claude_md_action == ACTION_NUDGE_INSERTED
+    assert "<!-- repoctx-nudge:v3 -->" in (tmp_path / "CLAUDE.md").read_text()
+
+
+def test_v1_to_v3_migration_is_idempotent(tmp_path: Path) -> None:
+    """A second install after the v1→v3 migration is a no-op."""
     from repoctx.harness.claude_code import NUDGE_MARKER_V1
 
     (tmp_path / "CLAUDE.md").write_text(
@@ -573,6 +640,18 @@ def test_v1_to_v2_migration_is_idempotent(tmp_path: Path) -> None:
     second = install_claude_code(tmp_path)
     assert first.claude_md_action == ACTION_NUDGE_INSERTED
     assert second.claude_md_action == ACTION_NO_OP
+
+
+def test_hand_edited_current_v3_block_is_never_touched(tmp_path: Path) -> None:
+    """Edits to the *current* block are safe by construction: marker present
+    → no_op, byte-identical file."""
+    from repoctx.harness.claude_code import NUDGE_MARKER_V3
+
+    before = f"# Project\n\n{NUDGE_MARKER_V3}\n> Locally customised wording.\n\nBody.\n"
+    (tmp_path / "CLAUDE.md").write_text(before)
+    result = install_claude_code(tmp_path)
+    assert result.claude_md_action == ACTION_NO_OP
+    assert (tmp_path / "CLAUDE.md").read_text() == before
 
 
 # -- UserPromptSubmit / Stop hooks ------------------------------------------
