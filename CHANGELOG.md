@@ -6,6 +6,62 @@ All notable changes to `repoctx` are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.17.0] — 2026-09-25
+
+### Fixed — a large module is searchable past its first 16 KB
+
+Every reader sliced a file to `max_file_bytes` (16 KB) before the chunker saw
+it, so everything past the cut in a large module was absent from the embedding
+index — and large modules are the hubs most questions are about. Measured on one
+production repo: 298 of 1,527 code files over the cap, **42% of code bytes
+unsearchable**, including its `models.py`, `scheduler.py` and admin routes.
+
+`FileRecord.content` keeps its 16 KB lexical view unchanged. The text past it is
+kept in a new `FileRecord.full_content` (only for files that were truncated, up
+to `max_embed_file_bytes`, 2 MB), and the chunker reads that. The git-object scan
+now also harvests a truncated module's late imports for the dependency graph,
+which only the working-tree scan did before.
+
+On that repo, a 12-question retrieval eval whose answers are known went from
+**3/12 to 10/12** files found in the bundle (11,444 chunks vs 6,465). **Run
+`repoctx index --incremental` (or `--refresh`) once after upgrading** to embed
+the newly reachable chunks — 6,015 there, ~16 minutes on a 4-core CPU. The
+read-path refresh reports `current` until origin/main next moves, so it will
+not do this on its own at an unchanged base. Note the new chunks include large
+generated files, if a repo commits them.
+
+### Added — shell and SQL are indexed
+
+`.sh`, `.bash` and `.sql` are indexed as code (line-window chunks; no symbol
+extractor). A repo's deploy, migration and ops logic often lives only in them.
+They also enter **lexical** ranking, so file lists for ops-shaped tasks change:
+on the repo above, "run migrations on the VM" now returns mostly shell scripts
+(and no related tests), and `deploy_docker_vm.sh` ranks first for a deploy
+rollback. They sort after `.js/.ts` so TS import resolution is unchanged.
+
+### Fixed — a contracts README's example is not a rule, and `## Do not` keeps its "not"
+
+`repoctx install`'s own `contracts/README.md` was discovered as a hard contract,
+and its fenced example became three **global hard constraints** in every bundle
+of every installed repo — one of them, a `## Do not` bullet handed on without
+its heading, reading `log token values`. A hard-authority directory's
+`README.md` is no longer a contract (only at the directory's root — a README
+deeper down is a real contract), bullets inside fenced code blocks are not
+extracted (CommonMark fence rules), and a `## Do not` bullet's statement now
+reads `Do not …` unless it already prohibits (`Avoid …`, `Never …`, `Don’t …`).
+
+### Fixed — a long-lived server follows the index on disk
+
+The MCP server loaded the index once and served those vectors for its whole
+life, so a background `repoctx index --refresh` reached the CLI and never the
+MCP tools. `EmbeddingRetriever` now reloads the vectors (not the model) when a
+save has finished — one `stat` per query when nothing changed — and keeps what
+it has if the new index does not load. The stamp it compares against is taken
+before the vectors load, so a save landing during the (slow) model load is not
+mistaken for one already seen. `VectorIndex.load` refuses an index whose
+vectors, metadata and recorded count disagree, which a read racing a save could
+otherwise pair silently; `index --incremental` falls back to a full build on one.
+
 ## [1.16.0] — 2026-09-07
 
 ### Added — measure whether validation ran, and whether it caught anything

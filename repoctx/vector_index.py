@@ -202,6 +202,16 @@ class VectorIndex:
                 f"scoring."
             )
 
+        # A read that races a save can pair one save's vectors with another's
+        # metadata; every score would then land on the wrong file, silently.
+        expected = config.get("entry_count", len(metadata))
+        n_vectors = vectors.shape[0] if getattr(vectors, "ndim", 0) else 0
+        if n_vectors != len(metadata) or len(metadata) != expected:
+            raise ValueError(
+                f"Vector index in {d} is inconsistent ({n_vectors} vectors, "
+                f"{len(metadata)} entries, {expected} recorded) — mid-write or corrupt"
+            )
+
         entries = [
             IndexEntry(
                 path=m["path"],

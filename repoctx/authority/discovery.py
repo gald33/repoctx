@@ -44,9 +44,27 @@ def _match_any(path: str, globs: tuple[str, ...]) -> bool:
     return any(fnmatch.fnmatch(posix, g) for g in globs)
 
 
+#: The README at the ROOT of a hard-authority directory (`contracts/README.md`)
+#: explains the convention; it is not a rule. Read as a contract, the scaffolded
+#: one's example bullets became global hard constraints in every bundle ("log token
+#: values", "sessions must expire…"). A README deeper down (`contracts/payments/
+#: README.md`) is somebody's real contract and stays one. `example.md` stays
+#: discoverable on purpose: it demonstrates the pipeline, and says to delete it.
+_HARD_AUTHORITY_ROOTS = frozenset(
+    g[: -len("/**")] for globs in HARD_AUTHORITY_GLOBS.values() for g in globs if g.endswith("/**")
+)
+
+
+def _is_authority_root_readme(path: str) -> bool:
+    p = PurePosixPath(path)
+    return p.name.lower() == "readme.md" and p.parent.as_posix() in _HARD_AUTHORITY_ROOTS
+
+
 def _classify_path(path: str) -> tuple[AuthorityType, AuthorityLevel] | None:
     for atype, globs in HARD_AUTHORITY_GLOBS.items():
         if _match_any(path, globs):
+            if _is_authority_root_readme(path):
+                return None
             return atype, AuthorityLevel.HARD
     for atype, globs in GUIDED_AUTHORITY_GLOBS.items():
         if _match_any(path, globs):

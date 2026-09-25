@@ -103,7 +103,7 @@ def _build_overlay_index(repo_root: Path, model, changed: list[str], config):
     texts: list[str] = []
     entries = []
     for rel in changed:
-        content = _read_text(repo_root / rel, DEFAULT_CONFIG.max_file_bytes)
+        content = _read_text(repo_root / rel, DEFAULT_CONFIG.max_embed_file_bytes)
         record = build_file_record(rel, content, repo_root, DEFAULT_CONFIG)
         chunks = _chunks_for_record(record, chunk_cfg)
         for c in chunks:
@@ -171,6 +171,11 @@ def overlay_retriever(
     """
     import os
 
+    # Follow the base index on disk before layering on it: the merged index below
+    # is built from `base_retriever.index` and would otherwise freeze it.
+    refresh = getattr(base_retriever, "refresh_index", None)
+    if refresh is not None:
+        refresh()
     root = Path(repo_root).resolve()
     enabled = config.overlay_worktree
     raw = os.environ.get("REPOCTX_OVERLAY_WORKTREE")

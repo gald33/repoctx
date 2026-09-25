@@ -37,24 +37,34 @@ IGNORED_DIRS = (
 )
 
 SUPPORTED_EXTENSIONS = (
+    ".bash",
     ".js",
     ".json",
     ".jsx",
     ".md",
     ".mdc",
     ".py",
+    ".sh",
+    ".sql",
     ".ts",
     ".tsx",
     ".yaml",
     ".yml",
 )
 
+# Shell and SQL carry no symbol extractor, so they chunk as plain line windows —
+# still far better than being absent: a repo's deploy, migration and ops logic
+# often lives entirely in them. They go LAST: `graph._resolve_ts_import` tries
+# these suffixes in order, and `./foo` must keep resolving to foo.js/.ts first.
 CODE_EXTENSIONS = (
     ".js",
     ".jsx",
     ".py",
     ".ts",
     ".tsx",
+    ".bash",
+    ".sh",
+    ".sql",
 )
 
 CONFIG_EXTENSIONS = (
@@ -113,7 +123,13 @@ class RepoCtxConfig:
     code_extensions: tuple[str, ...] = CODE_EXTENSIONS
     config_extensions: tuple[str, ...] = CONFIG_EXTENSIONS
     test_markers: tuple[str, ...] = TEST_MARKERS
+    # `max_file_bytes` bounds `FileRecord.content`, the text lexical scoring and
+    # symbol-graph heuristics read. The embedding chunker reads up to
+    # `max_embed_file_bytes` instead (`FileRecord.full_content`): chunks are
+    # bounded by the chunker, so there is no reason to leave everything past the
+    # first 16 KB of a large module unsearchable — and large modules are the hubs.
     max_file_bytes: int = 16_000
+    max_embed_file_bytes: int = 2_000_000
     max_docs: int = 6
     max_files: int = 8
     max_tests: int = 6
