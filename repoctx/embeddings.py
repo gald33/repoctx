@@ -405,6 +405,9 @@ class EmbeddingModel:
             return self._model.encode(text, normalize_embeddings=True)
 
 
+_UNSTAMPED = object()
+
+
 def _index_stamp(index_dir: Path | None) -> tuple[int, int] | None:
     """Identity of the last *finished* save: ``index_config.json`` is written last."""
     if index_dir is None:
@@ -427,12 +430,25 @@ class EmbeddingRetriever:
     """
 
     def __init__(
-        self, model: EmbeddingModel, index: VectorIndex, index_dir: str | Path | None = None,
+        self,
+        model: EmbeddingModel,
+        index: VectorIndex,
+        index_dir: str | Path | None = None,
+        loaded_stamp: Any = _UNSTAMPED,
     ) -> None:
+        """``loaded_stamp`` is ``_index_stamp`` taken BEFORE ``index`` was loaded.
+
+        Stamping here instead would mark a save that finished while the model was
+        loading (>60 s cold) as already seen, and the retriever would hold the
+        older vectors until some later save — exactly the unpack-then-refresh
+        startup a cloud session does.
+        """
         self.model = model
         self.index = index
         self._index_dir = Path(index_dir) if index_dir is not None else None
-        self._seen_stamp = _index_stamp(self._index_dir)
+        self._seen_stamp = (
+            _index_stamp(self._index_dir) if loaded_stamp is _UNSTAMPED else loaded_stamp
+        )
 
     def refresh_index(self) -> bool:
         """Swap in the on-disk index if a save finished since the last look.
@@ -524,6 +540,7 @@ def load_retriever_status(
         from repoctx.vector_index import IndexSchemaMismatch, VectorIndex
 
         index_dir = resolve_embeddings_dir(repo_root, config)
+        loaded_stamp = _index_stamp(Path(index_dir))
         try:
             index = VectorIndex.load(index_dir)
         except FileNotFoundError:
@@ -548,7 +565,8 @@ def load_retriever_status(
             )
         model = EmbeddingModel(config)
         return RetrieverStatus(
-            EmbeddingRetriever(model=model, index=index, index_dir=index_dir), STATUS_OK, "", canonical,
+            EmbeddingRetriever(model=model, index=index, index_dir=index_dir, loaded_stamp=loaded_stamp),
+            STATUS_OK, "", canonical,
         )
     except Exception as exc:  # noqa: BLE001 — never let retrieval load crash a call
         logger.info("Embeddings not available: %s", exc)
@@ -703,6 +721,9 @@ def _load_compatible_existing_index(
         return None
     except IndexSchemaMismatch as exc:
         logger.warning("Incremental fallback: schema mismatch (%s)", exc)
+        return None
+    except ValueError as exc:  # vectors/metadata/count disagree (VectorIndex.load)
+        logger.warning("Incremental fallback: inconsistent index (%s)", exc)
         return None
 
     if existing.model_name != config.model_name:

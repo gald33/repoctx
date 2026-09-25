@@ -54,16 +54,17 @@ SUPPORTED_EXTENSIONS = (
 
 # Shell and SQL carry no symbol extractor, so they chunk as plain line windows —
 # still far better than being absent: a repo's deploy, migration and ops logic
-# often lives entirely in them.
+# often lives entirely in them. They go LAST: `graph._resolve_ts_import` tries
+# these suffixes in order, and `./foo` must keep resolving to foo.js/.ts first.
 CODE_EXTENSIONS = (
-    ".bash",
     ".js",
     ".jsx",
     ".py",
-    ".sh",
-    ".sql",
     ".ts",
     ".tsx",
+    ".bash",
+    ".sh",
+    ".sql",
 )
 
 CONFIG_EXTENSIONS = (

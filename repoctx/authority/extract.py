@@ -22,11 +22,21 @@ from repoctx.authority.records import AuthorityLevel, AuthorityRecord
 _FRONT_MATTER_RE = re.compile(r"\A---\s*\n(?P<body>.*?)\n---\s*\n", re.DOTALL)
 _HEADING_RE = re.compile(r"^(#{2,4})\s+(?P<title>.+?)\s*$")
 _BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+\.)\s+(?P<item>.+?)\s*$")
-_FENCE_RE = re.compile(r"^\s*(?P<fence>```|~~~)")
+# CommonMark fences: up to 3 spaces, then 3+ backticks or 3+ tildes. A closing
+# fence is the same character, at least as long, with nothing after it; a
+# backtick "fence" whose info string holds a backtick is inline code, not a fence.
+_FENCE_RE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
 
 _DO_NOT_HEADINGS = {"do not", "do-not", "donot"}
-# A bullet under `## Do not` that already reads as a prohibition keeps its words.
-_PROHIBITION_RE = re.compile(r"^(?:do not|don't|never|no |must not|must never)\b", re.IGNORECASE)
+# A bullet under `## Do not` that already reads as a prohibition keeps its words:
+# prefixing "Avoid x" would invert it to "Do not avoid x".
+_PROHIBITION_RE = re.compile(
+    r"^(?:do\s+not|don['’]t|never|no|none|nobody|no\s+one|nothing|not|"
+    r"must\s+not|must\s+never|should\s+not|shouldn['’]t|cannot|can['’]t|"
+    r"avoid|stop|refrain|forbid(?:den)?|prohibit(?:ed)?|disallow(?:ed)?)\b",
+    re.IGNORECASE,
+)
+_LEADING_MARKUP = "*_`>\"'“‘ "
 
 _CONSTRAINT_HEADINGS = {
     "invariants", "invariant",
@@ -89,13 +99,19 @@ def extract_heading_bullets(text: str) -> list[tuple[str, list[str]]]:
     for line in text.splitlines():
         # A fenced block is an example of the format, not a rule in force.
         marker = _FENCE_RE.match(line)
-        if marker:
-            if fence is None:
-                fence = marker.group("fence")[0]
-            elif marker.group("fence")[0] == fence:
+        if fence is None:
+            if marker and not (marker.group("fence")[0] == "`" and "`" in marker.group("info")):
+                fence = marker.group("fence")
+                continue
+        else:
+            closes = (
+                marker is not None
+                and marker.group("fence")[0] == fence[0]
+                and len(marker.group("fence")) >= len(fence)
+                and not marker.group("info").strip()
+            )
+            if closes:
                 fence = None
-            continue
-        if fence is not None:
             continue
         heading = _HEADING_RE.match(line)
         if heading:
@@ -163,7 +179,10 @@ def extract_constraints(records: Iterable[AuthorityRecord]) -> list[Constraint]:
             if title in _DO_NOT_HEADINGS:
                 # The heading carries the negation; a statement handed on without
                 # it says the opposite ("log token values").
-                items = [i if _PROHIBITION_RE.match(i) else f"Do not {_decap(i)}" for i in items]
+                items = [
+                    i if _PROHIBITION_RE.match(i.lstrip(_LEADING_MARKUP)) else f"Do not {_decap(i)}"
+                    for i in items
+                ]
             bullets.extend(items)
 
         if not bullets:
