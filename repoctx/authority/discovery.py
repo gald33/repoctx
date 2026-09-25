@@ -44,9 +44,19 @@ def _match_any(path: str, globs: tuple[str, ...]) -> bool:
     return any(fnmatch.fnmatch(posix, g) for g in globs)
 
 
+#: A hard-authority directory's README explains the convention; it is not a rule.
+#: Read as a contract, the scaffolded README's example bullets became global hard
+#: constraints in every bundle ("log token values", "sessions must expire…").
+#: (`example.md` stays discoverable on purpose: it demonstrates the pipeline, and
+#: its own text says to delete it.)
+_HARD_SCAFFOLD_NAMES = frozenset({"readme.md"})
+
+
 def _classify_path(path: str) -> tuple[AuthorityType, AuthorityLevel] | None:
     for atype, globs in HARD_AUTHORITY_GLOBS.items():
         if _match_any(path, globs):
+            if PurePosixPath(path).name.lower() in _HARD_SCAFFOLD_NAMES:
+                return None
             return atype, AuthorityLevel.HARD
     for atype, globs in GUIDED_AUTHORITY_GLOBS.items():
         if _match_any(path, globs):

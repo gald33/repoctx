@@ -12,7 +12,7 @@ import logging
 import os
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from time import perf_counter
 from typing import TYPE_CHECKING, Any, Iterator
@@ -405,15 +405,64 @@ class EmbeddingModel:
             return self._model.encode(text, normalize_embeddings=True)
 
 
-class EmbeddingRetriever:
-    """Bundles a loaded model and vector index for query-time scoring."""
+def _index_stamp(index_dir: Path | None) -> tuple[int, int] | None:
+    """Identity of the last *finished* save: ``index_config.json`` is written last."""
+    if index_dir is None:
+        return None
+    try:
+        st = (index_dir / "index_config.json").stat()
+    except OSError:
+        return None
+    return st.st_mtime_ns, st.st_size
 
-    def __init__(self, model: EmbeddingModel, index: VectorIndex) -> None:
+
+class EmbeddingRetriever:
+    """Bundles a loaded model and vector index for query-time scoring.
+
+    Given ``index_dir``, the retriever follows the index on disk: a long-lived
+    holder (the MCP server caches one for its whole life) otherwise keeps serving
+    the vectors it loaded at startup however far the index has moved since —
+    a background refresh reached the CLI and never the MCP tools. Only the
+    vectors reload; the model, the slow part, is kept.
+    """
+
+    def __init__(
+        self, model: EmbeddingModel, index: VectorIndex, index_dir: str | Path | None = None,
+    ) -> None:
         self.model = model
         self.index = index
+        self._index_dir = Path(index_dir) if index_dir is not None else None
+        self._seen_stamp = _index_stamp(self._index_dir)
+
+    def refresh_index(self) -> bool:
+        """Swap in the on-disk index if a save finished since the last look.
+
+        One ``stat`` when nothing changed. A load that fails (torn read, schema
+        change) or an index built with another model keeps the current vectors;
+        the next save is tried afresh. Returns True iff the index was swapped.
+        """
+        stamp = _index_stamp(self._index_dir)
+        if stamp is None or stamp == self._seen_stamp:
+            return False
+        self._seen_stamp = stamp
+        from repoctx.vector_index import VectorIndex
+
+        try:
+            fresh = VectorIndex.load(self._index_dir)
+        except Exception:  # noqa: BLE001 — a bad reload must never break a query
+            logger.info("Index at %s changed but did not load; keeping the loaded one", self._index_dir,
+                        exc_info=True)
+            return False
+        if fresh.model_name != self.index.model_name or fresh.dimension != self.index.dimension:
+            logger.info("Index at %s was rebuilt with another model; keeping the loaded one", self._index_dir)
+            return False
+        self.index = fresh
+        logger.info("Reloaded embedding index from %s (%d entries)", self._index_dir, len(fresh.entries))
+        return True
 
     def query_scores(self, task: str) -> dict[str, float]:
         """Return {path: cosine_similarity} for every indexed file."""
+        self.refresh_index()
         query_vec = self.model.encode_query(task)
         return self.index.similarity_scores(query_vec)
 
@@ -499,7 +548,7 @@ def load_retriever_status(
             )
         model = EmbeddingModel(config)
         return RetrieverStatus(
-            EmbeddingRetriever(model=model, index=index), STATUS_OK, "", canonical,
+            EmbeddingRetriever(model=model, index=index, index_dir=index_dir), STATUS_OK, "", canonical,
         )
     except Exception as exc:  # noqa: BLE001 — never let retrieval load crash a call
         logger.info("Embeddings not available: %s", exc)
@@ -594,7 +643,13 @@ def try_load_retriever(
 def _chunks_for_record(
     record: FileRecord, chunk_cfg: ChunkConfig
 ) -> list[Chunk]:
-    """Extract symbols (if applicable) and chunk *record* accordingly."""
+    """Extract symbols (if applicable) and chunk *record* accordingly.
+
+    Chunks the whole file (``full_content``) when the record's lexical view was
+    truncated, so a large module is searchable past its first ``max_file_bytes``.
+    """
+    if record.full_content:
+        record = replace(record, content=record.full_content)
     symbols = extract_symbols(record) if record.kind in {"code", "test", "config"} else []
     return chunk_record(record, symbols=symbols, cfg=chunk_cfg)
 

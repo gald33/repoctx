@@ -186,7 +186,7 @@ def build_advisory_index(
             continue
         wanted = set(changed)
         blobs = {p: sha for p, sha in iter_tree_blobs(root, b.name, scan_config) if p in wanted}
-        contents = read_blobs(root, list(blobs.values()), scan_config.max_file_bytes)
+        contents = read_blobs(root, list(blobs.values()), scan_config.max_embed_file_bytes)
         n_chunks = 0
         for path in changed:
             sha = blobs.get(path)

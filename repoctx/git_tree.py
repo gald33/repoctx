@@ -169,7 +169,7 @@ def scan_git_tree(
     """
     root = Path(repo_root).resolve()
     blobs = iter_tree_blobs(root, ref, config)
-    contents = read_blobs(root, [sha for _, sha in blobs], config.max_file_bytes)
+    contents = read_blobs(root, [sha for _, sha in blobs], config.max_embed_file_bytes)
     index = RepositoryIndex(root=root)
     for path, sha in blobs:
         content = contents.get(sha, "")

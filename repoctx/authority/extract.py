@@ -22,6 +22,11 @@ from repoctx.authority.records import AuthorityLevel, AuthorityRecord
 _FRONT_MATTER_RE = re.compile(r"\A---\s*\n(?P<body>.*?)\n---\s*\n", re.DOTALL)
 _HEADING_RE = re.compile(r"^(#{2,4})\s+(?P<title>.+?)\s*$")
 _BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+\.)\s+(?P<item>.+?)\s*$")
+_FENCE_RE = re.compile(r"^\s*(?P<fence>```|~~~)")
+
+_DO_NOT_HEADINGS = {"do not", "do-not", "donot"}
+# A bullet under `## Do not` that already reads as a prohibition keeps its words.
+_PROHIBITION_RE = re.compile(r"^(?:do not|don't|never|no |must not|must never)\b", re.IGNORECASE)
 
 _CONSTRAINT_HEADINGS = {
     "invariants", "invariant",
@@ -79,8 +84,19 @@ def extract_heading_bullets(text: str) -> list[tuple[str, list[str]]]:
     """
     sections: list[tuple[str, list[str]]] = []
     current: tuple[str, list[str]] | None = None
+    fence: str | None = None
 
     for line in text.splitlines():
+        # A fenced block is an example of the format, not a rule in force.
+        marker = _FENCE_RE.match(line)
+        if marker:
+            if fence is None:
+                fence = marker.group("fence")[0]
+            elif marker.group("fence")[0] == fence:
+                fence = None
+            continue
+        if fence is not None:
+            continue
         heading = _HEADING_RE.match(line)
         if heading:
             title = heading.group("title").strip().lower().rstrip(":")
@@ -143,7 +159,11 @@ def extract_constraints(records: Iterable[AuthorityRecord]) -> list[Constraint]:
         validation_refs = [f"test:{p}" for p in validated_by]
 
         bullets: list[str] = []
-        for _title, items in extract_heading_bullets(body):
+        for title, items in extract_heading_bullets(body):
+            if title in _DO_NOT_HEADINGS:
+                # The heading carries the negation; a statement handed on without
+                # it says the opposite ("log token values").
+                items = [i if _PROHIBITION_RE.match(i) else f"Do not {_decap(i)}" for i in items]
             bullets.extend(items)
 
         if not bullets:
@@ -170,6 +190,11 @@ def extract_constraints(records: Iterable[AuthorityRecord]) -> list[Constraint]:
 
 
 # ---- helpers ----------------------------------------------------------------
+
+
+def _decap(text: str) -> str:
+    """Lower a sentence-initial capital ("Log x" -> "log x"), leaving acronyms ("SQL x") alone."""
+    return text[0].lower() + text[1:] if text[:1].isupper() and text[1:2].islower() else text
 
 
 def _constraint_from_inline(record: AuthorityRecord) -> Constraint:

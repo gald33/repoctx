@@ -112,6 +112,9 @@ def op_semantic_search(
         )
         kind = None
 
+    refresh = getattr(retriever, "refresh_index", None)
+    if refresh is not None:
+        refresh()
     query_vec = retriever.model.encode_query(query)
     scored = retriever.index.similarity_scores_by_id(query_vec)
 

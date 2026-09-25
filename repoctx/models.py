@@ -23,6 +23,10 @@ class FileRecord:
     # dependency graph — and big files are exactly the central hubs. The full
     # text is already read before slicing, so this costs no extra I/O.
     import_source: str = ""
+    # The file text up to ``max_embed_file_bytes``, set only when ``content`` was
+    # truncated (empty otherwise, so small files hold one copy). The embedding
+    # chunker reads this in preference to ``content``.
+    full_content: str = ""
     doc_score: float = 0.0
 
     @property

@@ -23,8 +23,8 @@ def scan_repository(
 
     for path in _iter_files(root, config):
         rel_path = path.relative_to(root).as_posix()
-        content, import_source = _read_text_and_imports(path, config.max_file_bytes)
-        record = build_file_record(rel_path, content, root, config, import_source=import_source)
+        content = _read_text(path, config.max_embed_file_bytes)
+        record = build_file_record(rel_path, content, root, config)
         _add_record(index, record)
 
     index.docs.sort(key=lambda item: (-item.doc_score, item.path))
@@ -44,7 +44,19 @@ def build_file_record(
     (:func:`repoctx.git_tree.scan_git_tree`) so both classify identically.
     ``absolute_path`` is the working-tree location (which may not exist on disk
     when the record came from a git blob in another branch).
+
+    Pass the file's whole text. ``content`` is cut to ``max_file_bytes`` here,
+    once, for every caller; past the cut the text is kept in ``full_content``
+    for the embedding chunker, and a Python module's imports are harvested from
+    it for the dependency graph. A caller that already truncated still works —
+    it just gets no ``full_content``.
     """
+    full_content = ""
+    if len(content) > config.max_file_bytes:
+        full_content = content[: config.max_embed_file_bytes]
+        if not import_source and rel_path.lower().endswith(".py"):
+            import_source = _harvest_import_lines(content)
+        content = content[: config.max_file_bytes]
     extension = PurePosixPath(rel_path).suffix.lower()
     kind = _classify_file(rel_path, extension, config)
     doc_score = _score_doc(rel_path) if kind == "doc" else 0.0
@@ -57,6 +69,7 @@ def build_file_record(
         subkind=subkind,
         content=content,
         import_source=import_source,
+        full_content=full_content,
         doc_score=doc_score,
     )
 
@@ -166,27 +179,6 @@ def _read_text(path: Path, max_bytes: int) -> str:
 # `from` (indented for function-local/deferred imports, which this codebase
 # uses heavily).
 _PY_IMPORT_LINE_RE = re.compile(r"^[ \t]*(?:import|from)[ \t]")
-
-
-def _read_text_and_imports(path: Path, max_bytes: int) -> tuple[str, str]:
-    """Return ``(content, import_source)`` in a single read.
-
-    ``content`` is capped at ``max_bytes`` as before. ``import_source`` holds
-    the import-bearing lines from the *whole* file, so the dependency graph
-    still sees imports that live past the cap in a large module. Python only —
-    the TS extractor matches across lines and can't be line-filtered safely.
-    """
-    try:
-        full = path.read_text(encoding="utf-8", errors="ignore")
-    except OSError as exc:
-        logger.warning("Failed to read %s: %s", path, exc)
-        return "", ""
-
-    content = full[:max_bytes]
-    if path.suffix.lower() != ".py" or len(full) <= max_bytes:
-        # Nothing truncated (or not Python): `content` already has every import.
-        return content, ""
-    return content, _harvest_import_lines(full)
 
 
 # Bound on how far a single import statement may be followed. Matches
