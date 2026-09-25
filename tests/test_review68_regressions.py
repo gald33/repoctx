@@ -71,6 +71,22 @@ def test_a_bullet_that_already_prohibits_is_not_prefixed(tmp_path: Path, bullet:
     assert statements == [bullet]
 
 
+@pytest.mark.parametrize(
+    ("bullet", "expected"),
+    [("Stop containers mid-deploy", "Do not stop containers mid-deploy"),
+     ("No-op writes to prod", "Do not no-op writes to prod"),
+     ("Not-null columns without a default", "Do not not-null columns without a default"),
+     ("Notify the owner twice", "Do not notify the owner twice")],
+)
+def test_a_bullet_that_only_looks_like_a_prohibition_keeps_its_not(
+    tmp_path: Path, bullet: str, expected: str,
+) -> None:
+    """Re-review: a hyphen ended `\\b` ("No-op"), and "stop" is a verb, not a negation."""
+    _write(tmp_path / "contracts" / "rules.md", f"# Rules\n\n## Do not\n- {bullet}\n")
+    statements = [c.statement for c in extract_constraints(AuthorityProducer(tmp_path).build_authority_records())]
+    assert statements == [expected]
+
+
 def test_a_longer_fence_is_not_closed_by_a_shorter_one() -> None:
     """Review #4: a ``` line inside a ```` block closed it, and `- x` leaked out."""
     text = "## Invariants\n- real\n````md\n```\n- x\n```\n````\n"

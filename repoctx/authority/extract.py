@@ -30,10 +30,14 @@ _FENCE_RE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
 _DO_NOT_HEADINGS = {"do not", "do-not", "donot"}
 # A bullet under `## Do not` that already reads as a prohibition keeps its words:
 # prefixing "Avoid x" would invert it to "Do not avoid x".
+# Whole words only — not followed by a word character OR a hyphen (`\b` ends at a
+# hyphen, so "No-op writes" / "Not-null columns" read as prohibitions and lost
+# their "not"). Trailing markup is fine ("**Never** log"). No ordinary verbs:
+# under this heading "Stop containers mid-deploy" means DON'T stop them.
 _PROHIBITION_RE = re.compile(
     r"^(?:do\s+not|don['’]t|never|no|none|nobody|no\s+one|nothing|not|"
     r"must\s+not|must\s+never|should\s+not|shouldn['’]t|cannot|can['’]t|"
-    r"avoid|stop|refrain|forbid(?:den)?|prohibit(?:ed)?|disallow(?:ed)?)\b",
+    r"avoid|refrain|forbid(?:den)?|prohibit(?:ed)?|disallow(?:ed)?)(?![\w-])",
     re.IGNORECASE,
 )
 _LEADING_MARKUP = "*_`>\"'“‘ "
